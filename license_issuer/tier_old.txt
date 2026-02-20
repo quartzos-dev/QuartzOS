@@ -1,0 +1,32 @@
+# QuartzOS License Tier Differences
+
+This file defines the current license tiers used by the issuer.
+
+## Tier Map
+
+- community: `0x0001`
+- pro: `0x0002`
+- enterprise: `0x0004`
+- ultimate: `0x0008`
+- all: `0x000F` (community + pro + enterprise + ultimate)
+
+## Difference Summary
+
+- `community` includes only bit `0x0001`.
+- `pro` includes only bit `0x0002`.
+- `enterprise` includes only bit `0x0004`.
+- `ultimate` includes only bit `0x0008`.
+- `all` includes every tier bit (`0x000F`).
+
+## How It Is Used
+
+- The tier is encoded into the license key `feature_bits` field.
+- Example:
+  - `QOS1-<id>-<feature_bits>-<sig>`
+  - `QOS2-<id>-<feature_bits>-<nonce>-<sig>`
+- Verification checks signature + issuance + revocation status.
+
+## Notes
+
+- In current code, tiers are bit flags, not textual roles in the key itself.
+- Product-level feature gating should map runtime features to these bits.

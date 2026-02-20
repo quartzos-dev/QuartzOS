@@ -1,0 +1,80 @@
+QuartzOS Commands
+=================
+
+1) Go to project root
+---------------------
+cd /Users/qian/Music/OS
+
+2) Build and launch (recommended)
+---------------------------------
+./build_and_launch.sh
+
+2b) GUI-focused QEMU launch (serial goes to file)
+-------------------------------------------------
+./tools/run-qemu.sh
+tail -f /Users/qian/Music/OS/build/qemu-serial.log
+
+2c) QEMU with serial in terminal (debug)
+----------------------------------------
+QEMU_SERIAL_MODE=stdio ./tools/run-qemu.sh
+
+2d) QEMU headless display (no window)
+-------------------------------------
+QEMU_DISPLAY_MODE=none ./tools/run-qemu.sh
+
+3) Build and launch with clean build
+------------------------------------
+./build_and_launch.sh --clean
+
+4) Build and launch in serial-only mode
+---------------------------------------
+./build_and_launch.sh --serial-only
+
+5) Show build_and_launch help
+-----------------------------
+./build_and_launch.sh --help
+
+6) Manual build targets
+-----------------------
+make clean
+make -j1
+make iso
+make disk
+make run
+
+7) If script is not executable
+------------------------------
+chmod +x /Users/qian/Music/OS/build_and_launch.sh
+bash /Users/qian/Music/OS/build_and_launch.sh
+
+8) License issuer commands
+--------------------------
+python3 /Users/qian/Music/OS/license_issuer/issue_license.py
+python3 /Users/qian/Music/OS/license_issuer/issue_license.py --help
+python3 /Users/qian/Music/OS/license_issuer/issue_license.py list --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/license_issuer/issue_license.py verify --key 'QOS2-0A0B0C0D-0001-10203040-2BCE3A12C18C12DB'
+python3 /Users/qian/Music/OS/license_issuer/issue_license.py issue --owner 'qian' --tier pro --version qos2 --count 1 --password 'QuartzOS-Admin-2026!'
+
+9) Open tier differences text file
+----------------------------------
+open -a TextEdit /Users/qian/Music/OS/license_issuer/tier_differences.txt
+
+10) In-OS ecosystem app commands (run inside QuartzOS shell)
+-------------------------------------------------------------
+apps
+apps find zenith
+apps find vector
+run /bin/eco001_vector_matrix
+run /bin/eco500_zenith_ops
+cat /etc/ecosystem_index.txt
+cat /etc/ecosystem_index.csv
+
+11) In-OS GUI asset pack commands (run inside QuartzOS shell)
+--------------------------------------------------------------
+ls /assets
+ls /assets/gui
+ls /assets/gui/icons/apps
+ls /assets/gui/icons/system
+ls /assets/gui/wallpapers
+cat /assets/gui/README.md
+cat /assets/gui/manifest.csv

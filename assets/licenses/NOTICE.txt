@@ -1,0 +1,13 @@
+QuartzOS License Notice
+=======================
+
+This system can verify and activate issued license keys.
+
+Default test key:
+QOS1-00000001-0001-D9C61476
+
+Activate in shell:
+license activate QOS1-00000001-0001-D9C61476
+
+Then run apps:
+run /bin/greeter
