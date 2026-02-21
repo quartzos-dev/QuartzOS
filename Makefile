@@ -26,7 +26,7 @@ endif
 
 CFLAGS := $(TARGET_FLAGS) -std=gnu11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -m64 -mno-red-zone -mcmodel=kernel -mno-mmx -mno-sse -mno-sse2 -msoft-float -fno-tree-vectorize -Wall -Wextra -Iinclude
 LDFLAGS := -nostdlib -z max-page-size=0x1000 -T boot/linker.ld
-APP_CFLAGS := $(TARGET_FLAGS) -std=gnu11 -ffreestanding -fno-pic -fno-pie -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -msoft-float -fno-tree-vectorize -nostdlib -Wall -Wextra
+APP_CFLAGS := $(TARGET_FLAGS) -std=gnu11 -ffreestanding -fno-pic -fno-pie -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -msoft-float -fno-tree-vectorize -nostdlib -Wall -Wextra -Iapps/named/common
 
 KERNEL_C_SRCS := \
 	kernel/main.c \
@@ -75,8 +75,10 @@ KERNEL_C_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(KERNEL_C_SRCS))
 KERNEL_ASM_OBJS := $(patsubst %.asm,$(BUILD_DIR)/%.o,$(KERNEL_ASM_SRCS))
 KERNEL_OBJS := $(KERNEL_C_OBJS) $(KERNEL_ASM_OBJS)
 
-APP_TEMPLATE_SRC := apps/named/named_app.c
 APP_NAMES := greeter banner counter fibonacci primes table spinner pulse progress matrix zigzag checker stairs diamond quotes weekdays stats hexview wave heartbeat
+NATIVE_APP_SRCS := $(foreach name,$(APP_NAMES),apps/named/$(name)/main.c)
+NATIVE_APP_OBJS := $(foreach name,$(APP_NAMES),$(BUILD_DIR)/apps/named/$(name)/main.o)
+APP_RUNTIME_OBJ := $(BUILD_DIR)/apps/named/common/runtime.o
 NATIVE_APP_ELFS := $(foreach name,$(APP_NAMES),$(BUILD_DIR)/apps/named/$(name).elf)
 NATIVE_ROOTFS_APP_MAPS := $(foreach name,$(APP_NAMES),/bin/$(name)=$(BUILD_DIR)/apps/named/$(name).elf)
 
@@ -137,36 +139,17 @@ $(ECOSYSTEM_MANIFEST): tools/generate_ecosystem_apps.py $(ECOSYSTEM_SRC)
 		--index $(ECOSYSTEM_INDEX) \
 		--list $(ECOSYSTEM_LIST)
 
-define APP_RULE
-$(BUILD_DIR)/apps/named/$(1).o: $(APP_TEMPLATE_SRC)
-	@mkdir -p $$(dir $$@)
-	$(CC) $(APP_CFLAGS) -DAPP_NAME=\"$(1)\" -DAPP_KIND=$(2) -c $$< -o $$@
+$(APP_RUNTIME_OBJ): apps/named/common/runtime.c apps/named/common/runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/apps/named/$(1).elf: $(BUILD_DIR)/apps/named/$(1).o apps/hello/linker.ld
-	@mkdir -p $$(dir $$@)
-	$(LD) -nostdlib -T apps/hello/linker.ld -o $$@ $$<
-endef
+$(NATIVE_APP_OBJS): $(BUILD_DIR)/apps/named/%/main.o: apps/named/%/main.c apps/named/common/runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) -c $< -o $@
 
-$(eval $(call APP_RULE,greeter,1))
-$(eval $(call APP_RULE,banner,2))
-$(eval $(call APP_RULE,counter,3))
-$(eval $(call APP_RULE,fibonacci,4))
-$(eval $(call APP_RULE,primes,5))
-$(eval $(call APP_RULE,table,6))
-$(eval $(call APP_RULE,spinner,7))
-$(eval $(call APP_RULE,pulse,8))
-$(eval $(call APP_RULE,progress,9))
-$(eval $(call APP_RULE,matrix,10))
-$(eval $(call APP_RULE,zigzag,11))
-$(eval $(call APP_RULE,checker,12))
-$(eval $(call APP_RULE,stairs,13))
-$(eval $(call APP_RULE,diamond,14))
-$(eval $(call APP_RULE,quotes,15))
-$(eval $(call APP_RULE,weekdays,16))
-$(eval $(call APP_RULE,stats,17))
-$(eval $(call APP_RULE,hexview,18))
-$(eval $(call APP_RULE,wave,19))
-$(eval $(call APP_RULE,heartbeat,20))
+$(BUILD_DIR)/apps/named/%.elf: $(BUILD_DIR)/apps/named/%/main.o $(APP_RUNTIME_OBJ) apps/hello/linker.ld
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T apps/hello/linker.ld -o $@ $(BUILD_DIR)/apps/named/$*/main.o $(APP_RUNTIME_OBJ)
 
 $(BUILD_DIR)/apps/ecosystem/%.o: $(ECOSYSTEM_GEN_DIR)/%.c $(ECOSYSTEM_MANIFEST) apps/ecosystem/template.c
 	@mkdir -p $(dir $@)
