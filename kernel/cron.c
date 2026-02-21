@@ -3,6 +3,7 @@
 #include <kernel/audit.h>
 #include <kernel/cron.h>
 #include <kernel/license.h>
+#include <kernel/secure_store.h>
 #include <kernel/slog.h>
 #include <kernel/trace.h>
 #include <lib/string.h>
@@ -341,11 +342,8 @@ bool cron_save(void) {
     }
     lock_release();
 
-    if (!sfs_write_file(CRON_CFG_PATH, out, strlen(out))) {
+    if (!secure_store_write_text(CRON_CFG_PATH, out, strlen(out), sfs_persistence_enabled())) {
         return false;
-    }
-    if (sfs_persistence_enabled()) {
-        return sfs_sync();
     }
     return true;
 }
@@ -353,7 +351,7 @@ bool cron_save(void) {
 bool cron_load(void) {
     char buf[2048];
     size_t read = 0;
-    if (!sfs_read_file(CRON_CFG_PATH, buf, sizeof(buf) - 1, &read)) {
+    if (!secure_store_read_text(CRON_CFG_PATH, buf, sizeof(buf), &read)) {
         return false;
     }
     buf[read] = '\0';

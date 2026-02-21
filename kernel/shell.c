@@ -426,16 +426,65 @@ static void execute_line(char *input) {
     if (strcmp(argv[0], "license") == 0) {
         if (argc == 1 || strcmp(argv[1], "status") == 0) {
             char active[LICENSE_MAX_KEY_TEXT + 1];
+            char terms_hash[65];
+            int active_now = license_is_active() ? 1 : 0;
+            uint8_t policy = license_active_policy_bits();
+            const char *tier = license_active_tier_name();
             license_active_key(active, sizeof(active));
             uint32_t lock_left = license_lockout_remaining_seconds();
-            kprintf("license: active=%s key=%s issued=%u revoked=%u failed=%u lock=%us last=%s\n",
-                    license_is_active() ? "yes" : "no",
+            if (!license_terms_hash(terms_hash, sizeof(terms_hash))) {
+                strncpy(terms_hash, "none", sizeof(terms_hash) - 1);
+                terms_hash[sizeof(terms_hash) - 1] = '\0';
+            }
+            kprintf("license: active=%s key=%s tier=%s policy=0x%x terms=%s hash=%s issued=%u revoked=%u failed=%u lock=%us last=%s\n",
+                    active_now ? "yes" : "no",
                     active,
+                    (active_now && tier) ? tier : "none",
+                    (unsigned)policy,
+                    license_terms_accepted() ? "accepted" : (license_terms_available() ? "pending" : "missing"),
+                    terms_hash,
                     (unsigned)license_registered_count(),
                     (unsigned)license_revoked_count(),
                     (unsigned)license_failed_attempts(),
                     (unsigned)lock_left,
                     license_error_text(license_last_error()));
+            return;
+        }
+
+        if (strcmp(argv[1], "terms") == 0) {
+            size_t cap = 128 * 1024;
+            char *buf = (char *)kmalloc(cap);
+            if (!buf) {
+                kprintf("license: out of memory\n");
+                return;
+            }
+            size_t read = 0;
+            if (!license_read_terms(buf, cap, &read)) {
+                kprintf("license: terms file unavailable\n");
+                kfree(buf);
+                return;
+            }
+            buf[read < cap ? read : (cap - 1)] = '\0';
+            kprintf("%s\n", buf);
+            kfree(buf);
+            return;
+        }
+
+        if (strcmp(argv[1], "accept") == 0) {
+            if (!license_accept_terms()) {
+                kprintf("license: cannot accept terms (missing or invalid terms file)\n");
+                return;
+            }
+            kprintf("license: terms accepted\n");
+            return;
+        }
+
+        if (strcmp(argv[1], "reject") == 0) {
+            if (!license_reject_terms()) {
+                kprintf("license: cannot reject terms\n");
+                return;
+            }
+            kprintf("license: terms set to pending\n");
             return;
         }
 
@@ -481,6 +530,9 @@ static void execute_line(char *input) {
 
         kprintf("license commands:\n");
         kprintf("  license status\n");
+        kprintf("  license terms\n");
+        kprintf("  license accept\n");
+        kprintf("  license reject\n");
         kprintf("  license verify <key>\n");
         kprintf("  license activate <key>\n");
         kprintf("  license deactivate\n");
@@ -1354,6 +1406,16 @@ static void execute_line(char *input) {
     if (strcmp(argv[0], "run") == 0) {
         if (argc < 2) {
             kprintf("run: missing operand\n");
+            return;
+        }
+        if (!license_terms_available()) {
+            audit_log("RUN_BLOCKED", "license-terms-missing");
+            kprintf("run: terms file missing. restore /etc/LICENSE.txt\n");
+            return;
+        }
+        if (!license_terms_accepted()) {
+            audit_log("RUN_BLOCKED", "license-terms-pending");
+            kprintf("run: terms not accepted. run 'license terms' then 'license accept'\n");
             return;
         }
         if (!license_is_active()) {

@@ -39,6 +39,7 @@ KERNEL_C_SRCS := \
 	kernel/syscall.c \
 	kernel/shell.c \
 	kernel/license.c \
+	kernel/secure_store.c \
 	kernel/trace.c \
 	kernel/audit.c \
 	kernel/slog.c \
@@ -102,9 +103,11 @@ ROOTFS_APP_MAPS := $(NATIVE_ROOTFS_APP_MAPS) $(ECOSYSTEM_ROOTFS_APP_MAPS)
 LICENSE_DB_SRC := assets/licenses/licenses.db
 LICENSE_NOTICE_SRC := assets/licenses/NOTICE.txt
 LICENSE_REVOKED_SRC := assets/licenses/licenses.revoked
+LICENSE_INTEGRITY_SRC := assets/licenses/licenses_integrity.json
+LICENSE_TEXT_SRC := LICENSE
 GUI_ASSET_MANIFEST := assets/gui/manifest.csv
 GUI_ASSETS_DIR := assets/gui
-ROOTFS_EXTRA_MAPS := /etc/licenses.db=$(LICENSE_DB_SRC) /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) /etc/ecosystem_apps.txt=$(ECOSYSTEM_SRC) /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST)
+ROOTFS_EXTRA_MAPS := /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) /etc/licenses.db=$(LICENSE_DB_SRC) /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) /etc/ecosystem_apps.txt=$(ECOSYSTEM_SRC) /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST)
 ROOTFS_IMG := $(BUILD_DIR)/rootfs.sfs
 DISK_IMAGE := $(BUILD_DIR)/$(OS_NAME)_disk.img
 KERNEL_ELF := $(BUILD_DIR)/kernel.elf
@@ -164,7 +167,7 @@ apps: $(ECOSYSTEM_MANIFEST) $(APP_ELFS)
 gui-assets:
 	$(PY) tools/generate_gui_assets.py
 
-$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
+$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
 	@mkdir -p $(dir $@)
 	$(PY) tools/mkrootfs.py $@ \
 		$(foreach map,$(ROOTFS_APP_MAPS),--add $(map)) \

@@ -1,5 +1,6 @@
 #include <filesystem/sfs.h>
 #include <kernel/config.h>
+#include <kernel/secure_store.h>
 #include <kernel/slog.h>
 #include <lib/string.h>
 
@@ -125,18 +126,9 @@ bool config_save(void) {
         strncat(blob, "\n", sizeof(blob) - strlen(blob) - 1);
     }
 
-    if (!sfs_write_file(CONFIG_PATH, blob, strlen(blob))) {
+    if (!secure_store_write_text(CONFIG_PATH, blob, strlen(blob), sfs_persistence_enabled())) {
         slog_log(SLOG_LEVEL_WARN, "config", "save failed");
         return false;
-    }
-    if (sfs_persistence_enabled()) {
-        bool ok = sfs_sync();
-        if (!ok) {
-            slog_log(SLOG_LEVEL_WARN, "config", "sync failed");
-        } else {
-            slog_log(SLOG_LEVEL_INFO, "config", "saved");
-        }
-        return ok;
     }
     slog_log(SLOG_LEVEL_INFO, "config", "saved");
     return true;
@@ -145,7 +137,7 @@ bool config_save(void) {
 bool config_load(void) {
     char blob[8192];
     size_t read = 0;
-    if (!sfs_read_file(CONFIG_PATH, blob, sizeof(blob) - 1, &read)) {
+    if (!secure_store_read_text(CONFIG_PATH, blob, sizeof(blob), &read)) {
         slog_log(SLOG_LEVEL_DEBUG, "config", "no config file");
         return false;
     }

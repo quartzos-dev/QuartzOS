@@ -433,6 +433,20 @@ void kernel_main(void) {
     } else {
         kprintf("SFS: no ATA disk, running from module image\n");
     }
+
+    size_t sealed_files = 0;
+    size_t seal_failures = 0;
+    if (sfs_encrypt_plain_files(&sealed_files, &seal_failures)) {
+        if (sealed_files > 0) {
+            kprintf("SFS: encrypted %u plaintext files\n", (unsigned)sealed_files);
+            if (sfs_persistence_enabled() && !sfs_sync()) {
+                kprintf("SFS: warning: failed to persist encrypted filesystem\n");
+            }
+        }
+    } else {
+        kprintf("SFS: warning: encryption sweep failed (sealed=%u failed=%u)\n",
+                (unsigned)sealed_files, (unsigned)seal_failures);
+    }
     boot_splash("Disk persistence", ++boot_step, boot_total_steps);
 
     config_init();

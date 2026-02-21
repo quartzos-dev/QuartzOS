@@ -131,6 +131,9 @@ Commands:
 - `clear`
 - `gui` (toggle console overlay)
 - `license status`
+- `license terms`
+- `license accept`
+- `license reject`
 - `license verify <key>`
 - `license activate <key>`
 - `license deactivate`
@@ -174,25 +177,40 @@ Features:
 - Syscall entry point (`int 0x80`) controlled by kernel.
 - Kernel pages are supervisor mappings; user mappings marked with `VMM_USER`.
 - User stack is explicitly mapped in user virtual space.
-- Kernel-side signed license verification with dual-format support (`QOS1` legacy + `QOS2` HMAC-SHA256).
+- Kernel-side signed license verification with triple-format support:
+  `QOS1` (legacy), `QOS2` (HMAC-SHA256/64), and `QOS3` (HMAC-SHA256/96).
+- Runtime activation is restricted to modern `QOS3` keys.
 - Revocation enforcement via `/etc/licenses.revoked`.
-- Tamper-evident license state file (HMAC-protected `/etc/license.state`).
+- Tamper-evident license state file (HMAC-protected `/etc/license.state`, v2+v3 compatible).
+- EULA acceptance tracking with signed persisted state (`/etc/license.accept`).
+- Terms file hashing and binding (`/etc/LICENSE.txt`) so acceptance resets on terms changes.
+- Authenticated encryption (`QENC1`) for critical persisted security files:
+  `/etc/licenses.db`, `/etc/licenses.revoked`, `/etc/license.state`,
+  `/etc/system.cfg`, `/etc/cron.cfg`.
 - Activation abuse protection with failed-attempt windowing + lockout.
 
 ### License system
+- EULA terms file in rootfs: `/etc/LICENSE.txt`.
 - Registry file in rootfs: `/etc/licenses.db`.
 - Revocation file in rootfs: `/etc/licenses.revoked`.
 - Active state file: `/etc/license.state`.
+- EULA acceptance state file: `/etc/license.accept`.
+- Security database files are encrypted at rest and transparently decrypted in-kernel.
+- Optional issuer integrity manifest:
+  `/etc/licenses_integrity.json` (host-side source: `assets/licenses/licenses_integrity.json`).
 - Ecosystem catalog files in rootfs:
   - `/etc/ecosystem_apps.txt`
   - `/etc/ecosystem_index.csv`
   - `/etc/ecosystem_index.txt`
-- `run` requires an active valid license.
-- Default test keys included in rootfs:
-  - `QOS1-00000001-0001-D9C61476`
-  - `QOS2-0A0B0C0D-0001-10203040-2BCE3A12C18C12DB`
+- `run` and GUI app launch require:
+  - accepted terms (`license accept`)
+  - active valid non-revoked `QOS3` key
+- Supported commercial tier names in issuer:
+  `consumer`, `enterprise`, `educational`, `server`,
+  `dev_standard`, `student_dev`, `startup_dev`, `open_lab`, `oem`
+- Legacy issuance (`QOS1`/`QOS2`) is blocked by default in issuer.
 - Password-protected issuer app:
-  `license_issuer/issue_license.py`
+  `QuartzOS-license-issuer/issue_license.py`
 
 ## Project layout
 
@@ -207,7 +225,7 @@ filesystem/    custom SFS
 gui/           desktop + window manager
 apps/          userspace app(s)
 assets/        rootfs seed assets (including license database)
-license_issuer/password-protected license issuer app
+QuartzOS-license-issuer/password-protected license issuer app
 lib/           freestanding libc subset
 tools/         build helpers (rootfs builder, qemu runner)
 include/       headers
@@ -302,6 +320,7 @@ sudo dd if=build/quartzos.iso of=/dev/sdX bs=4M status=progress conv=fsync
 - The default `make run` path boots from ISO and attaches `build/quartzos_disk.img` for persistent SFS writes.
 - SMP APs are brought online and run a shared work queue for kernel jobs.
 - Networking includes ARP + IPv4 + ICMP ping + a minimal TCP implementation (echo/listen + active text send).
-- Before launching apps, activate a key:
-  - `license activate QOS1-00000001-0001-D9C61476`
-  - `license activate QOS2-0A0B0C0D-0001-10203040-2BCE3A12C18C12DB`
+- Before launching apps:
+  - `license terms`
+  - `license accept`
+  - `license activate <QOS3-key>`

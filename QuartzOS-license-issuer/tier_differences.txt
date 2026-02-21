@@ -1,0 +1,38 @@
+# QuartzOS License Tier Differences (Current)
+
+This file defines the current license tiers and verification profiles.
+
+## Official Tiers (from LICENSE)
+
+- consumer: code `0x01` policy `0x42` (non_commercial, subscription)
+- enterprise: code `0x02` policy `0x40` (subscription)
+- educational: code `0x03` policy `0x44` (academic_only, subscription)
+- server: code `0x04` policy `0x48` (server_only, subscription)
+- dev_standard: code `0x05` policy `0x01` (development_only)
+- student_dev: code `0x06` policy `0x07` (development_only, non_commercial, academic_only)
+- startup_dev: code `0x07` policy `0x01` (development_only)
+- open_lab: code `0x08` policy `0x03` (development_only, non_commercial)
+- oem: code `0x09` policy `0x30` (oem_only, audit_required)
+
+## Key Formats
+
+- QOS1: `QOS1-<id8>-<feature4>-<sig8>`
+- QOS2: `QOS2-<id8>-<feature4>-<nonce8>-<sig16>`
+- QOS3: `QOS3-<id8>-<tier2>-<policy2>-<nonce8>-<sig24>`
+
+## Verification Behavior
+
+- Signature check (version-aware)
+- Issuance check against `licenses.db`
+- Revocation check against `licenses.revoked`
+- Optional strict checks:
+  - metadata consistency (`licenses_meta.csv`)
+  - store integrity manifest validation (`licenses_integrity.json`)
+
+## Legacy Compatibility
+
+Aliases still accepted by issuer:
+- community -> consumer
+- pro -> enterprise
+- ultimate -> server
+- all -> legacy bitmask (`0x000F`, only for qos1/qos2)

@@ -49,15 +49,19 @@ bash /Users/qian/Music/OS/build_and_launch.sh
 
 8) License issuer commands
 --------------------------
-python3 /Users/qian/Music/OS/license_issuer/issue_license.py
-python3 /Users/qian/Music/OS/license_issuer/issue_license.py --help
-python3 /Users/qian/Music/OS/license_issuer/issue_license.py list --password 'QuartzOS-Admin-2026!'
-python3 /Users/qian/Music/OS/license_issuer/issue_license.py verify --key 'QOS2-0A0B0C0D-0001-10203040-2BCE3A12C18C12DB'
-python3 /Users/qian/Music/OS/license_issuer/issue_license.py issue --owner 'qian' --tier pro --version qos2 --count 1 --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --help
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py list --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py verify --key 'QOS2-0A0B0C0D-0001-10203040-2BCE3A12C18C12DB'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py issue --owner 'qian' --tier enterprise --version qos3 --count 1 --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py issue --owner 'legacy-test' --tier consumer --version qos2 --allow-legacy --count 1 --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py verify-store --require-manifest
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py seal-store --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py harden-store --password 'QuartzOS-Admin-2026!'
 
 9) Open tier differences text file
 ----------------------------------
-open -a TextEdit /Users/qian/Music/OS/license_issuer/tier_differences.txt
+open -a TextEdit /Users/qian/Music/OS/QuartzOS-license-issuer/tier_differences.txt
 
 10) In-OS ecosystem app commands (run inside QuartzOS shell)
 -------------------------------------------------------------
@@ -79,7 +83,15 @@ ls /assets/gui/wallpapers
 cat /assets/gui/README.md
 cat /assets/gui/manifest.csv
 
-12) New GUI controls (mouse)
+12) In-OS license flow commands (run inside QuartzOS shell)
+-----------------------------------------------------------
+license status
+license terms
+license accept
+license activate <QOS3-KEY>
+run /bin/greeter
+
+13) New GUI controls (mouse)
 ----------------------------
 Top bar:
 - Activities: opens app/start menu

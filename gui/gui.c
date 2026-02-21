@@ -698,6 +698,14 @@ static int gui_launch_app(const char *app_name) {
     if (!app_name || !app_name[0]) {
         return 0;
     }
+    if (!license_terms_available()) {
+        gui_notify_push("Launcher blocked: LICENSE file missing", 0x00e08a8a);
+        return 0;
+    }
+    if (!license_terms_accepted()) {
+        gui_notify_push("Launcher blocked: accept terms in shell (license accept)", 0x00e08a8a);
+        return 0;
+    }
     if (!license_is_active()) {
         gui_notify_push("Launcher blocked: license inactive", 0x00e08a8a);
         return 0;

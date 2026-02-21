@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LICENSE_MAX_KEY_TEXT 44
+#define LICENSE_MAX_KEY_TEXT 64
 
 typedef enum license_error {
     LICENSE_ERR_NONE = 0,
@@ -14,7 +14,8 @@ typedef enum license_error {
     LICENSE_ERR_NOT_ISSUED = 3,
     LICENSE_ERR_REVOKED = 4,
     LICENSE_ERR_LOCKED = 5,
-    LICENSE_ERR_STATE_TAMPER = 6
+    LICENSE_ERR_STATE_TAMPER = 6,
+    LICENSE_ERR_LEGACY_DISABLED = 7
 } license_error_t;
 
 void license_init(void);
@@ -27,9 +28,19 @@ bool license_activate(const char *key);
 void license_deactivate(void);
 
 bool license_is_active(void);
+bool license_usage_allowed(void);
 size_t license_registered_count(void);
 size_t license_revoked_count(void);
 void license_active_key(char *out, size_t out_len);
+uint8_t license_active_tier_code(void);
+uint8_t license_active_policy_bits(void);
+const char *license_active_tier_name(void);
+bool license_terms_available(void);
+bool license_terms_accepted(void);
+bool license_accept_terms(void);
+bool license_reject_terms(void);
+bool license_terms_hash(char *out, size_t out_len);
+bool license_read_terms(char *out, size_t out_len, size_t *out_read);
 uint32_t license_failed_attempts(void);
 uint32_t license_lockout_remaining_seconds(void);
 license_error_t license_last_error(void);

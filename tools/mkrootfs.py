@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
+import hmac
 import os
+import secrets
 import struct
 
 SFS_MAGIC = 0x31534653
@@ -12,6 +15,59 @@ SFS_ROOT_PARENT = 0xFFFFFFFF
 
 HEADER_FMT = "<IIIIII"
 ENTRY_FMT = "<56sIIIII"
+
+SFS_ENC_MAGIC = b"QFSENC1"
+SFS_ENC_VERSION = 1
+SFS_ENC_NONCE_BYTES = 8
+SFS_ENC_TAG_BYTES = 32
+SFS_ENC_HEADER_BYTES = len(SFS_ENC_MAGIC) + 1 + SFS_ENC_NONCE_BYTES + SFS_ENC_TAG_BYTES + 4
+SFS_ENC_KEY_ENC = b"QuartzOS-SFS-ENC-V1-2026"
+SFS_ENC_KEY_MAC = b"QuartzOS-SFS-MAC-V1-2026"
+
+
+def _is_sealed_blob(data: bytes) -> bool:
+    return (
+        len(data) >= SFS_ENC_HEADER_BYTES
+        and data.startswith(SFS_ENC_MAGIC)
+        and data[len(SFS_ENC_MAGIC)] == SFS_ENC_VERSION
+    )
+
+
+def _stream_xor(nonce: bytes, data: bytes) -> bytes:
+    out = bytearray(len(data))
+    counter = 0
+    pos = 0
+    while pos < len(data):
+        msg = nonce + counter.to_bytes(4, "big")
+        block = hmac.new(SFS_ENC_KEY_ENC, msg, hashlib.sha256).digest()
+        take = min(len(data) - pos, len(block))
+        for i in range(take):
+            out[pos + i] = data[pos + i] ^ block[i]
+        pos += take
+        counter += 1
+    return bytes(out)
+
+
+def _compute_tag(nonce: bytes, cipher: bytes, plain_len: int) -> bytes:
+    msg = SFS_ENC_MAGIC + bytes([SFS_ENC_VERSION]) + nonce + plain_len.to_bytes(4, "little") + cipher
+    return hmac.new(SFS_ENC_KEY_MAC, msg, hashlib.sha256).digest()
+
+
+def seal_payload(data: bytes) -> bytes:
+    if _is_sealed_blob(data):
+        return data
+
+    nonce = secrets.token_bytes(SFS_ENC_NONCE_BYTES)
+    cipher = _stream_xor(nonce, data)
+    tag = _compute_tag(nonce, cipher, len(data))
+    return (
+        SFS_ENC_MAGIC
+        + bytes([SFS_ENC_VERSION])
+        + nonce
+        + tag
+        + len(data).to_bytes(4, "little")
+        + cipher
+    )
 
 
 class Builder:
@@ -70,6 +126,7 @@ class Builder:
         path = self.norm(path)
         parent, name = self.split_parent(path)
         parent_idx = self.add_dir(parent)
+        sealed = seal_payload(data)
 
         idx = len(self.entries)
         self.entries.append({
@@ -77,10 +134,10 @@ class Builder:
             "parent": parent_idx,
             "type": SFS_TYPE_FILE,
             "offset": 0,
-            "size": len(data),
+            "size": len(sealed),
         })
         self.path_to_index[path] = idx
-        self.file_payloads[idx] = data
+        self.file_payloads[idx] = sealed
 
     def serialize(self):
         entry_count = len(self.entries)

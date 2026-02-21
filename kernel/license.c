@@ -2,6 +2,7 @@
 #include <filesystem/sfs.h>
 #include <kernel/audit.h>
 #include <kernel/license.h>
+#include <kernel/secure_store.h>
 #include <lib/string.h>
 #include <memory/heap.h>
 #include <stdint.h>
@@ -9,21 +10,27 @@
 #define LICENSE_DB_PATH "/etc/licenses.db"
 #define LICENSE_REVOKED_PATH "/etc/licenses.revoked"
 #define LICENSE_STATE_PATH "/etc/license.state"
+#define LICENSE_TERMS_PATH "/etc/LICENSE.txt"
+#define LICENSE_ACCEPT_PATH "/etc/license.accept"
 
 #define LICENSE_V1_KEY_LEN 27
 #define LICENSE_V2_KEY_LEN 44
+#define LICENSE_V3_KEY_LEN 53
 #define LICENSE_MAX_KEYS 2048
 #define LICENSE_MAX_REVOCATIONS 2048
+#define LICENSE_REQUIRE_MODERN_ACTIVATION 1
 
 #define LICENSE_HZ 100u
 #define LICENSE_FAIL_WINDOW_TICKS (10u * LICENSE_HZ)
 #define LICENSE_LOCKOUT_TICKS (30u * LICENSE_HZ)
 #define LICENSE_MAX_FAILS 5u
+#define LICENSE_TERMS_MAX_BYTES (256u * 1024u)
 
 typedef enum key_version {
     KEY_VERSION_INVALID = 0,
     KEY_VERSION_V1 = 1,
-    KEY_VERSION_V2 = 2
+    KEY_VERSION_V2 = 2,
+    KEY_VERSION_V3 = 3
 } key_version_t;
 
 typedef struct key_entry {
@@ -58,6 +65,8 @@ static const uint32_t SHA256_K[64] = {
 };
 
 static const uint8_t HMAC_KEY_V2[] = "QuartzOS-Licensing-HMAC-Key-V2-2026";
+static const uint8_t HMAC_KEY_V3[] = "QuartzOS-Licensing-HMAC-Key-V3-2026";
+static const uint8_t HMAC_KEY_STATE[] = "QuartzOS-License-State-MAC-V3-2026";
 
 static key_entry_t g_registry[LICENSE_MAX_KEYS];
 static key_entry_t g_revoked[LICENSE_MAX_REVOCATIONS];
@@ -67,11 +76,16 @@ static size_t g_revoked_count;
 static int g_active;
 static char g_active_key[LICENSE_MAX_KEY_TEXT + 1];
 static uint8_t g_active_key_len;
+static uint8_t g_active_tier_code;
+static uint8_t g_active_policy_bits;
 
 static uint32_t g_failed_attempts;
 static uint64_t g_fail_window_start;
 static uint64_t g_lock_until_tick;
 static license_error_t g_last_error = LICENSE_ERR_NONE;
+static int g_terms_available;
+static int g_terms_accepted;
+static char g_terms_hash[65];
 
 static uint32_t rotr32(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32u - n));
@@ -282,6 +296,14 @@ static int constant_time_equal(const char *a, const char *b, size_t len) {
     return diff == 0;
 }
 
+static int constant_time_equal_bytes(const uint8_t *a, const uint8_t *b, size_t len) {
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
 static int parse_hex_u32(const char *s, size_t len, uint32_t *out) {
     if (!s || !out || len == 0 || len > 8) {
         return 0;
@@ -314,6 +336,30 @@ static int parse_hex_u64(const char *s, size_t len, uint64_t *out) {
     return 1;
 }
 
+static int parse_hex_u8(const char *s, size_t len, uint8_t *out) {
+    uint32_t value = 0;
+    if (!out || !parse_hex_u32(s, len, &value) || value > 0xFFu) {
+        return 0;
+    }
+    *out = (uint8_t)value;
+    return 1;
+}
+
+static int parse_hex_bytes(const char *s, size_t len, uint8_t *out, size_t out_len) {
+    if (!s || !out || len == 0 || (len % 2) != 0 || out_len != len / 2) {
+        return 0;
+    }
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_value(s[i * 2]);
+        int lo = hex_value(s[i * 2 + 1]);
+        if (hi < 0 || lo < 0) {
+            return 0;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 1;
+}
+
 static void u16_to_hex4(uint16_t value, char out[5]) {
     static const char digits[] = "0123456789ABCDEF";
     for (int i = 3; i >= 0; i--) {
@@ -332,13 +378,38 @@ static void u32_to_hex8(uint32_t value, char out[9]) {
     out[8] = '\0';
 }
 
-static void u64_to_hex16(uint64_t value, char out[17]) {
+static void u8_to_hex2(uint8_t value, char out[3]) {
     static const char digits[] = "0123456789ABCDEF";
-    for (int i = 15; i >= 0; i--) {
-        out[i] = digits[value & 0x0Fu];
-        value >>= 4;
+    out[0] = digits[(value >> 4) & 0x0Fu];
+    out[1] = digits[value & 0x0Fu];
+    out[2] = '\0';
+}
+
+static void bytes_to_hex(const uint8_t *bytes, size_t len, char *out) {
+    static const char digits[] = "0123456789ABCDEF";
+    if (!bytes || !out) {
+        return;
     }
-    out[16] = '\0';
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2] = digits[(bytes[i] >> 4) & 0x0Fu];
+        out[i * 2 + 1] = digits[bytes[i] & 0x0Fu];
+    }
+    out[len * 2] = '\0';
+}
+
+static const char *tier_name_for_code(uint8_t code) {
+    switch (code) {
+        case 0x01: return "consumer";
+        case 0x02: return "enterprise";
+        case 0x03: return "educational";
+        case 0x04: return "server";
+        case 0x05: return "dev_standard";
+        case 0x06: return "student_dev";
+        case 0x07: return "startup_dev";
+        case 0x08: return "open_lab";
+        case 0x09: return "oem";
+        default: return "unknown";
+    }
 }
 
 static key_version_t key_version_for(size_t len) {
@@ -348,7 +419,26 @@ static key_version_t key_version_for(size_t len) {
     if (len == LICENSE_V2_KEY_LEN) {
         return KEY_VERSION_V2;
     }
+    if (len == LICENSE_V3_KEY_LEN) {
+        return KEY_VERSION_V3;
+    }
     return KEY_VERSION_INVALID;
+}
+
+static void key_metadata(const char *key, size_t key_len, key_version_t version,
+                         uint8_t *out_tier_code, uint8_t *out_policy_bits) {
+    uint8_t tier = 0;
+    uint8_t policy = 0;
+    if (key && version == KEY_VERSION_V3 && key_len == LICENSE_V3_KEY_LEN) {
+        (void)parse_hex_u8(key + 14, 2, &tier);
+        (void)parse_hex_u8(key + 17, 2, &policy);
+    }
+    if (out_tier_code) {
+        *out_tier_code = tier;
+    }
+    if (out_policy_bits) {
+        *out_policy_bits = policy;
+    }
 }
 
 static int validate_hex_span(const char *key, size_t start, size_t end) {
@@ -386,7 +476,7 @@ static int normalize_key(const char *key, char out[LICENSE_MAX_KEY_TEXT + 1],
             !validate_hex_span(out, 19, 27)) {
             return 0;
         }
-    } else {
+    } else if (version == KEY_VERSION_V2) {
         if (strncmp(out, "QOS2-", 5) != 0 || out[13] != '-' || out[18] != '-' || out[27] != '-') {
             return 0;
         }
@@ -394,6 +484,18 @@ static int normalize_key(const char *key, char out[LICENSE_MAX_KEY_TEXT + 1],
             !validate_hex_span(out, 14, 18) ||
             !validate_hex_span(out, 19, 27) ||
             !validate_hex_span(out, 28, 44)) {
+            return 0;
+        }
+    } else {
+        if (strncmp(out, "QOS3-", 5) != 0 || out[13] != '-' || out[16] != '-' ||
+            out[19] != '-' || out[28] != '-') {
+            return 0;
+        }
+        if (!validate_hex_span(out, 5, 13) ||
+            !validate_hex_span(out, 14, 16) ||
+            !validate_hex_span(out, 17, 19) ||
+            !validate_hex_span(out, 20, 28) ||
+            !validate_hex_span(out, 29, 53)) {
             return 0;
         }
     }
@@ -470,6 +572,37 @@ static uint64_t license_signature_v2_for(uint32_t id, uint16_t feature_bits, uin
     return digest_first_u64(mac);
 }
 
+static void license_signature_v3_for(uint32_t id, uint8_t tier_code,
+                                     uint8_t policy_bits, uint32_t nonce,
+                                     uint8_t out_sig[12]) {
+    char id_hex[9];
+    char tier_hex[3];
+    char policy_hex[3];
+    char nonce_hex[9];
+    char payload[128];
+    uint8_t mac[32];
+
+    u32_to_hex8(id, id_hex);
+    u8_to_hex2(tier_code, tier_hex);
+    u8_to_hex2(policy_bits, policy_hex);
+    u32_to_hex8(nonce, nonce_hex);
+
+    payload[0] = '\0';
+    strncat(payload, "QOS3:", sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, id_hex, sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, ":", sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, tier_hex, sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, ":", sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, policy_hex, sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, ":", sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, nonce_hex, sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, ":QUARTZOS-LICENSE-V3", sizeof(payload) - strlen(payload) - 1);
+
+    hmac_sha256(HMAC_KEY_V3, sizeof(HMAC_KEY_V3) - 1,
+                (const uint8_t *)payload, strlen(payload), mac);
+    memcpy(out_sig, mac, 12);
+}
+
 static int key_signature_matches(const char *key, size_t key_len, key_version_t version) {
     if (!key || key_len == 0) {
         return 0;
@@ -499,6 +632,24 @@ static int key_signature_matches(const char *key, size_t key_len, key_version_t 
             return 0;
         }
         return sig == license_signature_v2_for(id, (uint16_t)feat, nonce);
+    }
+
+    if (version == KEY_VERSION_V3) {
+        uint32_t id = 0;
+        uint8_t tier = 0;
+        uint8_t policy = 0;
+        uint32_t nonce = 0;
+        uint8_t sig[12];
+        uint8_t expected[12];
+        if (!parse_hex_u32(key + 5, 8, &id) ||
+            !parse_hex_u8(key + 14, 2, &tier) ||
+            !parse_hex_u8(key + 17, 2, &policy) ||
+            !parse_hex_u32(key + 20, 8, &nonce) ||
+            !parse_hex_bytes(key + 29, 24, sig, sizeof(sig))) {
+            return 0;
+        }
+        license_signature_v3_for(id, tier, policy, nonce, expected);
+        return constant_time_equal_bytes(sig, expected, sizeof(sig));
     }
 
     return 0;
@@ -547,14 +698,14 @@ static void entries_clear(key_entry_t *entries, size_t max_entries, size_t *coun
 static void load_key_file(const char *path, key_entry_t *entries, size_t max_entries, size_t *count) {
     entries_clear(entries, max_entries, count);
 
-    size_t cap = 128 * 1024;
+    size_t cap = 512 * 1024;
     char *buf = (char *)kmalloc(cap + 1);
     if (!buf) {
         return;
     }
 
     size_t read = 0;
-    if (!sfs_read_file(path, buf, cap, &read)) {
+    if (!secure_store_read_text(path, buf, cap + 1, &read)) {
         kfree(buf);
         return;
     }
@@ -639,7 +790,7 @@ static int lockout_active(void) {
     return g_lock_until_tick != 0 && now_ticks() < g_lock_until_tick;
 }
 
-static uint64_t signature_state_mac(const char *value) {
+static uint64_t signature_state_mac_v2(const char *value) {
     char payload[96];
     uint8_t mac[32];
     payload[0] = '\0';
@@ -650,14 +801,27 @@ static uint64_t signature_state_mac(const char *value) {
     return digest_first_u64(mac);
 }
 
-static void write_state_value(const char *value) {
-    if (!value || !*value) {
-        return;
+static void signature_state_mac_v3(const char *value, uint8_t out_mac[12]) {
+    char payload[128];
+    uint8_t mac[32];
+    payload[0] = '\0';
+    strncat(payload, "STATEV3:", sizeof(payload) - strlen(payload) - 1);
+    strncat(payload, value, sizeof(payload) - strlen(payload) - 1);
+    hmac_sha256(HMAC_KEY_STATE, sizeof(HMAC_KEY_STATE) - 1,
+                (const uint8_t *)payload, strlen(payload), mac);
+    memcpy(out_mac, mac, 12);
+}
+
+static int write_signed_value(const char *path, const char *value) {
+    if (!path || !value || !*value) {
+        return 0;
     }
 
-    char mac_hex[17];
-    char line[128];
-    u64_to_hex16(signature_state_mac(value), mac_hex);
+    char mac_hex[25];
+    char line[256];
+    uint8_t mac[12];
+    signature_state_mac_v3(value, mac);
+    bytes_to_hex(mac, sizeof(mac), mac_hex);
 
     line[0] = '\0';
     strncat(line, value, sizeof(line) - strlen(line) - 1);
@@ -665,12 +829,93 @@ static void write_state_value(const char *value) {
     strncat(line, mac_hex, sizeof(line) - strlen(line) - 1);
     strncat(line, "\n", sizeof(line) - strlen(line) - 1);
 
-    if (!sfs_write_file(LICENSE_STATE_PATH, line, strlen(line))) {
-        return;
+    return secure_store_write_text(path, line, strlen(line), sfs_persistence_enabled()) ? 1 : 0;
+}
+
+static int read_signed_value(const char *path, char *value_out, size_t value_out_len, int *tampered) {
+    if (!path || !value_out || value_out_len == 0) {
+        return 0;
     }
-    if (sfs_persistence_enabled()) {
-        (void)sfs_sync();
+    if (tampered) {
+        *tampered = 0;
     }
+
+    char buf[512];
+    size_t read = 0;
+    if (!secure_store_read_text(path, buf, sizeof(buf), &read)) {
+        return 0;
+    }
+    buf[read] = '\0';
+
+    size_t end = 0;
+    while (end < read && buf[end] != '\n' && buf[end] != '\r') {
+        end++;
+    }
+    if (end == 0 || end >= sizeof(buf)) {
+        return 0;
+    }
+    buf[end] = '\0';
+
+    char *sep = strchr(buf, '|');
+    if (!sep) {
+        if (tampered) {
+            *tampered = 1;
+        }
+        return 0;
+    }
+
+    *sep = '\0';
+    char *value = buf;
+    char *mac_text = sep + 1;
+    size_t mac_len = strlen(mac_text);
+
+    if (mac_len == 16) {
+        uint64_t file_mac = 0;
+        if (!parse_hex_u64(mac_text, 16, &file_mac)) {
+            if (tampered) {
+                *tampered = 1;
+            }
+            return 0;
+        }
+        if (file_mac != signature_state_mac_v2(value)) {
+            if (tampered) {
+                *tampered = 1;
+            }
+            return 0;
+        }
+    } else if (mac_len == 24) {
+        uint8_t file_mac[12];
+        uint8_t expected[12];
+        if (!parse_hex_bytes(mac_text, 24, file_mac, sizeof(file_mac))) {
+            if (tampered) {
+                *tampered = 1;
+            }
+            return 0;
+        }
+        signature_state_mac_v3(value, expected);
+        if (!constant_time_equal_bytes(file_mac, expected, sizeof(file_mac))) {
+            if (tampered) {
+                *tampered = 1;
+            }
+            return 0;
+        }
+    } else {
+        if (tampered) {
+            *tampered = 1;
+        }
+        return 0;
+    }
+
+    size_t value_len = strlen(value);
+    if (value_len + 1 > value_out_len) {
+        return 0;
+    }
+    memcpy(value_out, value, value_len + 1);
+    return 1;
+}
+
+static void write_state_value(const char *value) {
+    (void)write_signed_value(LICENSE_STATE_PATH, value);
 }
 
 static void set_active_key(const char *key, size_t key_len) {
@@ -678,12 +923,16 @@ static void set_active_key(const char *key, size_t key_len) {
     g_active_key_len = (uint8_t)key_len;
     memcpy(g_active_key, key, key_len);
     g_active_key[key_len] = '\0';
+    key_metadata(g_active_key, g_active_key_len, key_version_for(g_active_key_len),
+                 &g_active_tier_code, &g_active_policy_bits);
 }
 
 static void clear_active_key(void) {
     g_active = 0;
     g_active_key_len = 0;
     g_active_key[0] = '\0';
+    g_active_tier_code = 0;
+    g_active_policy_bits = 0;
 }
 
 static void clear_failures(void) {
@@ -721,57 +970,105 @@ static void load_revocations(void) {
     load_key_file(LICENSE_REVOKED_PATH, g_revoked, LICENSE_MAX_REVOCATIONS, &g_revoked_count);
 }
 
-static void load_state(void) {
-    clear_active_key();
+static int load_terms_hash(void) {
+    g_terms_available = 0;
+    g_terms_hash[0] = '\0';
 
-    char buf[160];
+    size_t cap = LICENSE_TERMS_MAX_BYTES;
+    char *buf = (char *)kmalloc(cap + 1u);
+    if (!buf) {
+        return 0;
+    }
+
     size_t read = 0;
-    if (!sfs_read_file(LICENSE_STATE_PATH, buf, sizeof(buf) - 1, &read)) {
-        return;
+    if (!secure_store_read_text(LICENSE_TERMS_PATH, buf, cap + 1u, &read)) {
+        kfree(buf);
+        return 0;
     }
     buf[read] = '\0';
 
-    size_t end = 0;
-    while (end < read && buf[end] != '\n' && buf[end] != '\r') {
-        end++;
-    }
-    if (end == 0) {
+    uint8_t digest[32];
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, (const uint8_t *)buf, read);
+    sha256_final(&ctx, digest);
+    bytes_to_hex(digest, sizeof(digest), g_terms_hash);
+
+    g_terms_available = 1;
+    kfree(buf);
+    return 1;
+}
+
+static void write_accept_state(int accepted) {
+    if (!g_terms_available || g_terms_hash[0] == '\0') {
         return;
     }
 
-    char line[160];
-    if (end >= sizeof(line)) {
-        end = sizeof(line) - 1;
-    }
-    memcpy(line, buf, end);
-    line[end] = '\0';
+    char value[96];
+    value[0] = '\0';
+    strncat(value, "V1:", sizeof(value) - strlen(value) - 1);
+    strncat(value, g_terms_hash, sizeof(value) - strlen(value) - 1);
+    strncat(value, accepted ? ":1" : ":0", sizeof(value) - strlen(value) - 1);
+    (void)write_signed_value(LICENSE_ACCEPT_PATH, value);
+}
 
-    char *sep = strchr(line, '|');
-    char *value = line;
-    if (sep) {
-        *sep = '\0';
-        char *mac_text = sep + 1;
-        size_t mac_len = strlen(mac_text);
-        if (mac_len != 16) {
+static void load_accept_state(void) {
+    g_terms_accepted = 0;
+    if (!g_terms_available || g_terms_hash[0] == '\0') {
+        return;
+    }
+
+    char value[128];
+    int tampered = 0;
+    if (!read_signed_value(LICENSE_ACCEPT_PATH, value, sizeof(value), &tampered)) {
+        if (tampered) {
             g_last_error = LICENSE_ERR_STATE_TAMPER;
-            audit_log("LICENSE_STATE_TAMPER", "bad-mac-len");
-            write_state_value("NONE");
-            return;
+            audit_log("LICENSE_ACCEPT_TAMPER", "signature-invalid");
+            write_accept_state(0);
         }
-        uint64_t file_mac = 0;
-        if (!parse_hex_u64(mac_text, 16, &file_mac)) {
+        return;
+    }
+
+    size_t value_len = strlen(value);
+    if (value_len != 69 || strncmp(value, "V1:", 3) != 0 || value[67] != ':') {
+        g_last_error = LICENSE_ERR_STATE_TAMPER;
+        audit_log("LICENSE_ACCEPT_TAMPER", "payload-invalid");
+        write_accept_state(0);
+        return;
+    }
+
+    char file_hash[65];
+    memcpy(file_hash, value + 3, 64);
+    file_hash[64] = '\0';
+    if (strcmp(file_hash, g_terms_hash) != 0) {
+        g_terms_accepted = 0;
+        write_accept_state(0);
+        return;
+    }
+
+    if (value[68] == '1') {
+        g_terms_accepted = 1;
+    } else if (value[68] == '0') {
+        g_terms_accepted = 0;
+    } else {
+        g_last_error = LICENSE_ERR_STATE_TAMPER;
+        audit_log("LICENSE_ACCEPT_TAMPER", "flag-invalid");
+        write_accept_state(0);
+    }
+}
+
+static void load_state(void) {
+    clear_active_key();
+
+    char value[128];
+    int tampered = 0;
+    if (!read_signed_value(LICENSE_STATE_PATH, value, sizeof(value), &tampered)) {
+        if (tampered) {
             g_last_error = LICENSE_ERR_STATE_TAMPER;
-            audit_log("LICENSE_STATE_TAMPER", "bad-mac-format");
+            audit_log("LICENSE_STATE_TAMPER", "signature-invalid");
             write_state_value("NONE");
-            return;
         }
-        uint64_t expected = signature_state_mac(value);
-        if (file_mac != expected) {
-            g_last_error = LICENSE_ERR_STATE_TAMPER;
-            audit_log("LICENSE_STATE_TAMPER", "mac-mismatch");
-            write_state_value("NONE");
-            return;
-        }
+        return;
     }
 
     if (strcmp(value, "NONE") == 0) {
@@ -782,6 +1079,9 @@ static void load_state(void) {
     size_t normalized_len = 0;
     key_version_t version = KEY_VERSION_INVALID;
     if (!normalize_key(value, normalized, &normalized_len, &version)) {
+        return;
+    }
+    if (LICENSE_REQUIRE_MODERN_ACTIVATION && version != KEY_VERSION_V3) {
         return;
     }
     if (!key_signature_matches(normalized, normalized_len, version)) {
@@ -802,15 +1102,22 @@ void license_init(void) {
     clear_active_key();
     clear_failures();
     g_last_error = LICENSE_ERR_NONE;
+    g_terms_available = 0;
+    g_terms_accepted = 0;
+    g_terms_hash[0] = '\0';
 
     load_registry();
     load_revocations();
+    (void)load_terms_hash();
+    load_accept_state();
     load_state();
 }
 
 void license_reload(void) {
     load_registry();
     load_revocations();
+    (void)load_terms_hash();
+    load_accept_state();
 
     if (g_active &&
         (!key_is_registered(g_active_key, g_active_key_len) ||
@@ -870,6 +1177,10 @@ bool license_activate(const char *key) {
         record_activation_failure(LICENSE_ERR_FORMAT, "format", 1);
         return false;
     }
+    if (LICENSE_REQUIRE_MODERN_ACTIVATION && version != KEY_VERSION_V3) {
+        record_activation_failure(LICENSE_ERR_LEGACY_DISABLED, "legacy-disabled", 1);
+        return false;
+    }
     if (!key_signature_matches(normalized, key_len, version)) {
         record_activation_failure(LICENSE_ERR_SIGNATURE, "signature", 1);
         return false;
@@ -912,6 +1223,16 @@ bool license_is_active(void) {
     return true;
 }
 
+bool license_usage_allowed(void) {
+    if (!license_is_active()) {
+        return false;
+    }
+    if (!g_terms_available) {
+        return false;
+    }
+    return g_terms_accepted != 0;
+}
+
 size_t license_registered_count(void) {
     return g_registry_count;
 }
@@ -931,6 +1252,62 @@ void license_active_key(char *out, size_t out_len) {
     }
     strncpy(out, g_active_key, out_len - 1);
     out[out_len - 1] = '\0';
+}
+
+uint8_t license_active_tier_code(void) {
+    return g_active_tier_code;
+}
+
+uint8_t license_active_policy_bits(void) {
+    return g_active_policy_bits;
+}
+
+const char *license_active_tier_name(void) {
+    return tier_name_for_code(g_active_tier_code);
+}
+
+bool license_terms_available(void) {
+    return g_terms_available != 0;
+}
+
+bool license_terms_accepted(void) {
+    return g_terms_available != 0 && g_terms_accepted != 0;
+}
+
+bool license_accept_terms(void) {
+    if (!g_terms_available || g_terms_hash[0] == '\0') {
+        return false;
+    }
+    g_terms_accepted = 1;
+    write_accept_state(1);
+    audit_log("LICENSE_TERMS_ACCEPT", g_terms_hash);
+    return true;
+}
+
+bool license_reject_terms(void) {
+    if (!g_terms_available || g_terms_hash[0] == '\0') {
+        return false;
+    }
+    g_terms_accepted = 0;
+    write_accept_state(0);
+    audit_log("LICENSE_TERMS_REJECT", g_terms_hash);
+    return true;
+}
+
+bool license_terms_hash(char *out, size_t out_len) {
+    if (!out || out_len == 0 || !g_terms_available || g_terms_hash[0] == '\0') {
+        return false;
+    }
+    strncpy(out, g_terms_hash, out_len - 1);
+    out[out_len - 1] = '\0';
+    return true;
+}
+
+bool license_read_terms(char *out, size_t out_len, size_t *out_read) {
+    if (!out || out_len == 0 || !g_terms_available) {
+        return false;
+    }
+    return secure_store_read_text(LICENSE_TERMS_PATH, out, out_len, out_read);
 }
 
 uint32_t license_failed_attempts(void) {
@@ -961,6 +1338,7 @@ const char *license_error_text(license_error_t error) {
         case LICENSE_ERR_REVOKED: return "revoked";
         case LICENSE_ERR_LOCKED: return "activation-locked";
         case LICENSE_ERR_STATE_TAMPER: return "state-tampered";
+        case LICENSE_ERR_LEGACY_DISABLED: return "legacy-key-disabled";
         default: return "unknown";
     }
 }

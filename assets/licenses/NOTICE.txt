@@ -1,13 +1,16 @@
 QuartzOS License Notice
 =======================
 
-This system can verify and activate issued license keys.
+This system enforces both:
+1) A valid activated QOS3 license key.
+2) Acceptance of /etc/LICENSE.txt terms.
 
-Default test key:
-QOS1-00000001-0001-D9C61476
+Legacy QOS1/QOS2 activation is disabled.
 
-Activate in shell:
-license activate QOS1-00000001-0001-D9C61476
+Example activation flow:
+license terms
+license accept
+license activate QOS3-D74CC0DB-01-42-7DAE205E-884D63BCED0DE3055951B22C
 
 Then run apps:
 run /bin/greeter

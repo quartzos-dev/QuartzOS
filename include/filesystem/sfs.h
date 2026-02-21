@@ -30,5 +30,6 @@ bool sfs_attach_block_device(uint32_t start_lba, uint32_t sector_count);
 bool sfs_sync(void);
 bool sfs_persistence_enabled(void);
 bool sfs_check(char *out, size_t out_len);
+bool sfs_encrypt_plain_files(size_t *converted, size_t *failed);
 
 #endif
