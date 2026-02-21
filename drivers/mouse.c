@@ -158,9 +158,24 @@ void mouse_handle_irq(void) {
 }
 
 mouse_state_t mouse_get_state(void) {
-    int alpha = (g_mouse.left || g_mouse.right || g_mouse.middle) ? 192 : 124;
-    smooth_x_fp = smooth_step(smooth_x_fp, raw_x * MOUSE_FP_ONE, alpha);
-    smooth_y_fp = smooth_step(smooth_y_fp, raw_y * MOUSE_FP_ONE, alpha);
+    int target_x_fp = raw_x * MOUSE_FP_ONE;
+    int target_y_fp = raw_y * MOUSE_FP_ONE;
+    int dist_x = abs_i(target_x_fp - smooth_x_fp) >> MOUSE_FP_SHIFT;
+    int dist_y = abs_i(target_y_fp - smooth_y_fp) >> MOUSE_FP_SHIFT;
+    int dist = dist_x > dist_y ? dist_x : dist_y;
+
+    int alpha = 224;
+    if (dist > 8) {
+        alpha = 252;
+    } else if (dist > 3) {
+        alpha = 240;
+    }
+    if (g_mouse.left || g_mouse.right || g_mouse.middle) {
+        alpha = 252;
+    }
+
+    smooth_x_fp = smooth_step(smooth_x_fp, target_x_fp, alpha);
+    smooth_y_fp = smooth_step(smooth_y_fp, target_y_fp, alpha);
 
     g_mouse.x = clamp_coord(smooth_x_fp >> MOUSE_FP_SHIFT, limit_x);
     g_mouse.y = clamp_coord(smooth_y_fp >> MOUSE_FP_SHIFT, limit_y);

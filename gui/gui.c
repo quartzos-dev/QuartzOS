@@ -4,10 +4,32 @@
 #include <filesystem/sfs.h>
 #include <gui/gui.h>
 #include <kernel/console.h>
+#include <kernel/license.h>
 #include <lib/string.h>
+#include <memory/heap.h>
 #include <net/net.h>
+#include <process/user.h>
 
 #define MAX_WINDOWS 4
+#define FEATURE_CATEGORY_COUNT 12
+#define FEATURES_PER_CATEGORY 80
+#define FEATURE_TOTAL (FEATURE_CATEGORY_COUNT * FEATURES_PER_CATEGORY)
+#define FEATURE_ROWS_PER_PAGE 12
+#define FEATURE_MAX_NAME 80
+#define FEATURE_CATEGORY_ALL FEATURE_CATEGORY_COUNT
+
+#define LAUNCHER_MAX_APPS 1200
+#define LAUNCHER_APP_NAME_MAX 64
+#define LAUNCHER_ROWS_PER_PAGE 14
+
+#define NOTIFY_MAX 24
+#define NOTIFY_TEXT_MAX 96
+
+enum {
+    LAUNCHER_CAT_ALL = 0,
+    LAUNCHER_CAT_NATIVE = 1,
+    LAUNCHER_CAT_ECOSYSTEM = 2
+};
 
 #define TOP_BAR_H 30
 #define LEFT_DOCK_W 64
@@ -16,7 +38,7 @@
 #define DOCK_ICON_H 54
 #define DOCK_ICON_GAP 10
 #define TITLE_H 24
-#define FRAME_TARGET_TICKS 2
+#define FRAME_TARGET_TICKS 1
 
 enum {
     SNAP_NONE = 0,
@@ -54,17 +76,29 @@ typedef struct start_item {
     int action;
 } start_item_t;
 
+typedef struct gui_notification {
+    char text[NOTIFY_TEXT_MAX];
+    uint32_t color;
+    uint64_t tick;
+} gui_notification_t;
+
 enum {
     START_ACTION_MONITOR = 0,
     START_ACTION_TERMINAL = 1,
     START_ACTION_FILES = 2,
     START_ACTION_NETWORK = 3,
-    START_ACTION_OVERLAY = 4,
-    START_ACTION_RESTORE_ALL = 5,
-    START_ACTION_CLOSE_ALL = 6
+    START_ACTION_OPEN_LAUNCHER = 4,
+    START_ACTION_OPEN_FEATURE_HUB = 5,
+    START_ACTION_OPEN_QUICK_PANEL = 6,
+    START_ACTION_OVERLAY = 7,
+    START_ACTION_RESTORE_ALL = 8,
+    START_ACTION_CLOSE_ALL = 9
 };
 
 static const start_item_t start_items[] = {
+    {"Application Launcher", START_ACTION_OPEN_LAUNCHER},
+    {"Feature Center (960)", START_ACTION_OPEN_FEATURE_HUB},
+    {"Quick Settings", START_ACTION_OPEN_QUICK_PANEL},
     {"System Monitor", START_ACTION_MONITOR},
     {"Terminal", START_ACTION_TERMINAL},
     {"File Explorer", START_ACTION_FILES},
@@ -91,6 +125,24 @@ static int context_menu_x;
 static int context_menu_y;
 static int show_desktop_mode;
 static int desktop_hidden[MAX_WINDOWS];
+static int launcher_open;
+static int launcher_category;
+static int launcher_page;
+static int launcher_selected;
+static int launcher_count;
+static int launcher_index_view[LAUNCHER_MAX_APPS];
+static char launcher_apps[LAUNCHER_MAX_APPS][LAUNCHER_APP_NAME_MAX];
+static uint64_t launcher_last_refresh_tick;
+static int feature_hub_open;
+static int feature_category;
+static int feature_page;
+static int feature_selected;
+static uint8_t feature_enabled[FEATURE_TOTAL];
+static int quick_panel_open;
+static int notifications_open;
+static gui_notification_t notifications[NOTIFY_MAX];
+static int notify_count;
+static int notify_write_idx;
 
 static int mouse_prev_left;
 static int mouse_prev_right;
@@ -353,6 +405,336 @@ static void format_ipv4(uint32_t ip, char *out, size_t out_len) {
     strncat(out, c, out_len - strlen(out) - 1);
     strncat(out, ".", out_len - strlen(out) - 1);
     strncat(out, d, out_len - strlen(out) - 1);
+}
+
+static char ascii_lower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c - 'A' + 'a');
+    }
+    return c;
+}
+
+static int text_starts_with(const char *s, const char *prefix) {
+    if (!s || !prefix) {
+        return 0;
+    }
+    while (*prefix) {
+        if (*s != *prefix) {
+            return 0;
+        }
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+static int text_cmp_ci(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = ascii_lower(*a);
+        char cb = ascii_lower(*b);
+        if (ca != cb) {
+            return (int)(unsigned char)ca - (int)(unsigned char)cb;
+        }
+        a++;
+        b++;
+    }
+    return (int)(unsigned char)ascii_lower(*a) - (int)(unsigned char)ascii_lower(*b);
+}
+
+static int app_is_ecosystem_name(const char *name) {
+    return text_starts_with(name, "eco");
+}
+
+static void gui_notify_push(const char *text, uint32_t color) {
+    if (!text || !text[0]) {
+        return;
+    }
+
+    gui_notification_t *n = &notifications[notify_write_idx];
+    strncpy(n->text, text, sizeof(n->text) - 1);
+    n->text[sizeof(n->text) - 1] = '\0';
+    n->color = color;
+    n->tick = pit_ticks();
+
+    notify_write_idx = (notify_write_idx + 1) % NOTIFY_MAX;
+    if (notify_count < NOTIFY_MAX) {
+        notify_count++;
+    }
+}
+
+static void launcher_sort_apps(void) {
+    for (int i = 1; i < launcher_count; i++) {
+        char tmp[LAUNCHER_APP_NAME_MAX];
+        strncpy(tmp, launcher_apps[i], sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+
+        int j = i - 1;
+        while (j >= 0 && text_cmp_ci(launcher_apps[j], tmp) > 0) {
+            strncpy(launcher_apps[j + 1], launcher_apps[j], LAUNCHER_APP_NAME_MAX - 1);
+            launcher_apps[j + 1][LAUNCHER_APP_NAME_MAX - 1] = '\0';
+            j--;
+        }
+        strncpy(launcher_apps[j + 1], tmp, LAUNCHER_APP_NAME_MAX - 1);
+        launcher_apps[j + 1][LAUNCHER_APP_NAME_MAX - 1] = '\0';
+    }
+}
+
+static void launcher_refresh_apps(int force) {
+    uint64_t now = pit_ticks();
+    if (!force && launcher_count > 0 && now - launcher_last_refresh_tick < 200) {
+        return;
+    }
+
+    size_t cap = 128 * 1024;
+    char *out = (char *)kmalloc(cap);
+    if (!out) {
+        return;
+    }
+
+    int n = sfs_list("/bin", out, cap);
+    if (n < 0) {
+        kfree(out);
+        return;
+    }
+
+    launcher_count = 0;
+    char line[LAUNCHER_APP_NAME_MAX];
+    size_t line_len = 0;
+    for (size_t i = 0; i <= (size_t)n; i++) {
+        char ch = out[i];
+        if (ch == '\r') {
+            continue;
+        }
+
+        if (ch == '\n' || ch == '\0') {
+            if (line_len > 0) {
+                if (line[line_len - 1] == '/') {
+                    line_len--;
+                }
+                line[line_len] = '\0';
+                if (line_len > 0 && launcher_count < LAUNCHER_MAX_APPS) {
+                    strncpy(launcher_apps[launcher_count], line, LAUNCHER_APP_NAME_MAX - 1);
+                    launcher_apps[launcher_count][LAUNCHER_APP_NAME_MAX - 1] = '\0';
+                    launcher_count++;
+                }
+                line_len = 0;
+            }
+        } else if (line_len < sizeof(line) - 1) {
+            line[line_len++] = ch;
+        }
+    }
+
+    launcher_sort_apps();
+    launcher_last_refresh_tick = now;
+
+    if (launcher_selected >= launcher_count) {
+        launcher_selected = launcher_count > 0 ? launcher_count - 1 : 0;
+    }
+    kfree(out);
+}
+
+static int launcher_matches_category(const char *name, int category) {
+    if (category == LAUNCHER_CAT_ALL) {
+        return 1;
+    }
+    if (category == LAUNCHER_CAT_NATIVE) {
+        return !app_is_ecosystem_name(name);
+    }
+    if (category == LAUNCHER_CAT_ECOSYSTEM) {
+        return app_is_ecosystem_name(name);
+    }
+    return 0;
+}
+
+static int launcher_build_index_view(void) {
+    int n = 0;
+    for (int i = 0; i < launcher_count && n < LAUNCHER_MAX_APPS; i++) {
+        if (launcher_matches_category(launcher_apps[i], launcher_category)) {
+            launcher_index_view[n++] = i;
+        }
+    }
+    return n;
+}
+
+static int launcher_page_count(void) {
+    int visible = launcher_build_index_view();
+    if (visible <= 0) {
+        return 1;
+    }
+    int pages = visible / LAUNCHER_ROWS_PER_PAGE;
+    if ((visible % LAUNCHER_ROWS_PER_PAGE) != 0) {
+        pages++;
+    }
+    if (pages < 1) {
+        pages = 1;
+    }
+    return pages;
+}
+
+static void launcher_clamp_page(void) {
+    int pages = launcher_page_count();
+    if (launcher_page < 0) {
+        launcher_page = 0;
+    }
+    if (launcher_page >= pages) {
+        launcher_page = pages - 1;
+    }
+}
+
+static const char *feature_category_name(int category) {
+    static const char *names[FEATURE_CATEGORY_COUNT] = {
+        "Desktop UX",
+        "Windowing",
+        "Launcher",
+        "Search",
+        "Input",
+        "Rendering",
+        "Security",
+        "Filesystem",
+        "Network",
+        "Automation",
+        "Accessibility",
+        "Performance"
+    };
+    if (category >= 0 && category < FEATURE_CATEGORY_COUNT) {
+        return names[category];
+    }
+    return "All Features";
+}
+
+static int feature_filtered_count(void) {
+    if (feature_category == FEATURE_CATEGORY_ALL) {
+        return FEATURE_TOTAL;
+    }
+    return FEATURES_PER_CATEGORY;
+}
+
+static int feature_global_index_from_filtered(int filtered) {
+    if (feature_category == FEATURE_CATEGORY_ALL) {
+        return filtered;
+    }
+    return feature_category * FEATURES_PER_CATEGORY + filtered;
+}
+
+static int feature_page_count(void) {
+    int total = feature_filtered_count();
+    int pages = total / FEATURE_ROWS_PER_PAGE;
+    if ((total % FEATURE_ROWS_PER_PAGE) != 0) {
+        pages++;
+    }
+    if (pages < 1) {
+        pages = 1;
+    }
+    return pages;
+}
+
+static void feature_clamp_page(void) {
+    int pages = feature_page_count();
+    if (feature_page < 0) {
+        feature_page = 0;
+    }
+    if (feature_page >= pages) {
+        feature_page = pages - 1;
+    }
+}
+
+static int feature_enabled_count(void) {
+    int count = 0;
+    for (int i = 0; i < FEATURE_TOTAL; i++) {
+        if (feature_enabled[i]) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void feature_compose_name(int feature_index, char *out, size_t out_len) {
+    static const char *verbs[] = {
+        "Adaptive", "Context", "Dynamic", "Secure", "Predictive", "Guided", "Instant", "Smart",
+        "Unified", "Reactive", "Progressive", "Composable", "Efficient", "Reliable", "Scalable", "Resilient"
+    };
+    static const char *nouns[] = {
+        "Launcher", "Dock", "Search", "Window", "Panel", "Widget", "Scheduler", "Renderer",
+        "Input", "Inspector", "Console", "Workspace", "Profile", "Pipeline", "Service", "Overlay"
+    };
+    static const char *mods[] = {
+        "Optimizer", "Engine", "Routing", "Isolation", "Analytics", "Recovery", "Sync", "Preview",
+        "Telemetry", "Snapshot", "Broker", "Tuning", "Assist", "Automation", "Layout", "Policy"
+    };
+
+    if (!out || out_len == 0) {
+        return;
+    }
+
+    uint32_t u = (uint32_t)feature_index;
+    const char *v = verbs[(u * 7u + 3u) % (sizeof(verbs) / sizeof(verbs[0]))];
+    const char *n = nouns[(u * 11u + 5u) % (sizeof(nouns) / sizeof(nouns[0]))];
+    const char *m = mods[(u * 13u + 1u) % (sizeof(mods) / sizeof(mods[0]))];
+
+    out[0] = '\0';
+    strncat(out, v, out_len - strlen(out) - 1);
+    strncat(out, " ", out_len - strlen(out) - 1);
+    strncat(out, n, out_len - strlen(out) - 1);
+    strncat(out, " ", out_len - strlen(out) - 1);
+    strncat(out, m, out_len - strlen(out) - 1);
+}
+
+static void feature_set_page_state(int enabled) {
+    int total = feature_filtered_count();
+    int start = feature_page * FEATURE_ROWS_PER_PAGE;
+    for (int i = 0; i < FEATURE_ROWS_PER_PAGE; i++) {
+        int filtered_idx = start + i;
+        if (filtered_idx >= total) {
+            break;
+        }
+        int gidx = feature_global_index_from_filtered(filtered_idx);
+        if (gidx >= 0 && gidx < FEATURE_TOTAL) {
+            feature_enabled[gidx] = enabled ? 1u : 0u;
+        }
+    }
+}
+
+static int gui_launch_app(const char *app_name) {
+    if (!app_name || !app_name[0]) {
+        return 0;
+    }
+    if (!license_is_active()) {
+        gui_notify_push("Launcher blocked: license inactive", 0x00e08a8a);
+        return 0;
+    }
+
+    char path[128];
+    path[0] = '\0';
+    strncat(path, "/bin/", sizeof(path) - strlen(path) - 1);
+    strncat(path, app_name, sizeof(path) - strlen(path) - 1);
+
+    size_t cap = 2 * 1024 * 1024;
+    void *image = kmalloc(cap);
+    if (!image) {
+        gui_notify_push("Launcher failed: out of memory", 0x00e08a8a);
+        return 0;
+    }
+
+    size_t read = 0;
+    if (!sfs_read_file(path, image, cap, &read)) {
+        gui_notify_push("Launcher failed: app not found", 0x00e08a8a);
+        kfree(image);
+        return 0;
+    }
+
+    int ok = user_run_elf(image, read) ? 1 : 0;
+    kfree(image);
+
+    if (ok) {
+        char msg[NOTIFY_TEXT_MAX];
+        msg[0] = '\0';
+        strncat(msg, "App finished: ", sizeof(msg) - strlen(msg) - 1);
+        strncat(msg, app_name, sizeof(msg) - strlen(msg) - 1);
+        gui_notify_push(msg, 0x008ed8aa);
+    } else {
+        gui_notify_push("Launcher failed: runtime start error", 0x00e08a8a);
+    }
+    return ok;
 }
 
 static int find_window_by_kind(window_kind_t kind) {
@@ -658,31 +1040,95 @@ static int start_button_x(void);
 static int start_button_y(void);
 static int start_button_w(void);
 static int start_button_h(void);
+static int launcher_button_x(void);
+static int launcher_button_y(void);
+static int launcher_button_w(void);
+static int launcher_button_h(void);
+static int feature_button_x(void);
+static int feature_button_y(void);
+static int feature_button_w(void);
+static int feature_button_h(void);
+static int quick_button_x(void);
+static int quick_button_y(void);
+static int quick_button_w(void);
+static int quick_button_h(void);
+static int notify_button_x(void);
+static int notify_button_y(void);
+static int notify_button_w(void);
+static int notify_button_h(void);
 
 static void draw_top_bar(int w) {
-    uint32_t bg = 0x001f334a;
-    fb_fill_rect(0, 0, w, TOP_BAR_H, bg);
-    fb_fill_rect(0, TOP_BAR_H - 1, w, 1, 0x006184a8);
+    uint32_t bg = 0x00233858;
+    for (int y = 0; y < TOP_BAR_H; y++) {
+        uint8_t t = (uint8_t)((y * 255) / (TOP_BAR_H ? TOP_BAR_H : 1));
+        fb_fill_rect(0, y, w, 1, rgb_mix(bg, 0x00121f2f, t));
+    }
+    fb_fill_rect(0, TOP_BAR_H - 1, w, 1, 0x006ea8d4);
 
     int sx = start_button_x();
     int sy = start_button_y();
-    uint32_t sbg = start_menu_open ? 0x00425f7d : 0x00334c67;
+    uint32_t sbg = start_menu_open ? 0x004f76a1 : 0x00334c67;
     fb_fill_rect(sx, sy, start_button_w(), start_button_h(), sbg);
     fb_fill_rect(sx, sy, start_button_w(), 1, 0x00d0e4f7);
     fb_draw_text(sx + 10, sy + 8, "Activities", 0x00f8fcff, sbg);
+
+    int lx = launcher_button_x();
+    uint32_t lbg = launcher_open ? 0x005388c4 : 0x00314963;
+    fb_fill_rect(lx, launcher_button_y(), launcher_button_w(), launcher_button_h(), lbg);
+    fb_fill_rect(lx, launcher_button_y(), launcher_button_w(), 1, 0x00bee2ff);
+    fb_draw_text(lx + 14, launcher_button_y() + 8, "Launcher", 0x00eff8ff, lbg);
+
+    int fx = feature_button_x();
+    uint32_t fbg = feature_hub_open ? 0x006a4bb6 : 0x00314963;
+    fb_fill_rect(fx, feature_button_y(), feature_button_w(), feature_button_h(), fbg);
+    fb_fill_rect(fx, feature_button_y(), feature_button_w(), 1, 0x00d0c4ff);
+    fb_draw_text(fx + 14, feature_button_y() + 8, "Features", 0x00eff8ff, fbg);
+
+    int qx = quick_button_x();
+    uint32_t qbg = quick_panel_open ? 0x004f7f6b : 0x00314963;
+    fb_fill_rect(qx, quick_button_y(), quick_button_w(), quick_button_h(), qbg);
+    fb_fill_rect(qx, quick_button_y(), quick_button_w(), 1, 0x00b7eed4);
+    fb_draw_text(qx + 18, quick_button_y() + 8, "Quick", 0x00eff8ff, qbg);
+
+    int nx = notify_button_x();
+    uint32_t nbg = notifications_open ? 0x00776545 : 0x00314963;
+    fb_fill_rect(nx, notify_button_y(), notify_button_w(), notify_button_h(), nbg);
+    fb_fill_rect(nx, notify_button_y(), notify_button_w(), 1, 0x00f6d4aa);
+    fb_draw_text(nx + 10, notify_button_y() + 8, "Alerts", 0x00fff3e4, nbg);
 
     const char *active = "Desktop";
     if (active_index >= 0 && active_index < window_count && windows[active_index].visible && !windows[active_index].minimized) {
         active = windows[active_index].title;
     }
-    fb_draw_text(sx + start_button_w() + 14, 10, active, 0x00c8dcef, bg);
+    fb_draw_text(nx + notify_button_w() + 14, 10, active, 0x00c8dcef, bg);
 
-    int info_x = w - 250;
-    if (info_x < sx + start_button_w() + 120) {
-        info_x = sx + start_button_w() + 120;
+    int chip_x = nx + notify_button_w() + 110;
+    for (int i = 0; i < window_count; i++) {
+        if (!windows[i].visible) {
+            continue;
+        }
+        uint32_t c = (i == active_index && !windows[i].minimized) ? 0x00426d96 : 0x002b4562;
+        int chip_w = 72;
+        if (chip_x + chip_w > w - 330) {
+            break;
+        }
+        fb_fill_rect(chip_x, 6, chip_w, 18, c);
+        fb_draw_text(chip_x + 6, 12, windows[i].title, 0x00d9ebfc, c);
+        chip_x += chip_w + 6;
     }
+
+    int info_x = w - 322;
     fb_draw_text(info_x, 10, net_available() ? "Network up" : "Network down", 0x00bdd3e7, bg);
-    fb_draw_text(w - 136, 10, overlay ? "CLI on" : "CLI off", 0x00bdd3e7, bg);
+    char feat_buf[24];
+    char feat_cnt[8];
+    feat_buf[0] = '\0';
+    feat_cnt[0] = '\0';
+    u32_to_dec((uint32_t)feature_enabled_count(), feat_cnt, sizeof(feat_cnt));
+    strncat(feat_buf, "F:", sizeof(feat_buf) - strlen(feat_buf) - 1);
+    strncat(feat_buf, feat_cnt, sizeof(feat_buf) - strlen(feat_buf) - 1);
+    strncat(feat_buf, "/960", sizeof(feat_buf) - strlen(feat_buf) - 1);
+    fb_draw_text(w - 208, 10, feat_buf, 0x00c6dbef, bg);
+    fb_draw_text(w - 160, 10, overlay ? "CLI on" : "CLI off", 0x00bdd3e7, bg);
     draw_clock(w - 72, 10, bg);
 }
 
@@ -720,6 +1166,70 @@ static int start_button_w(void) {
 
 static int start_button_h(void) {
     return TOP_BAR_H - 8;
+}
+
+static int launcher_button_x(void) {
+    return start_button_x() + start_button_w() + 8;
+}
+
+static int launcher_button_y(void) {
+    return start_button_y();
+}
+
+static int launcher_button_w(void) {
+    return 84;
+}
+
+static int launcher_button_h(void) {
+    return start_button_h();
+}
+
+static int feature_button_x(void) {
+    return launcher_button_x() + launcher_button_w() + 6;
+}
+
+static int feature_button_y(void) {
+    return start_button_y();
+}
+
+static int feature_button_w(void) {
+    return 82;
+}
+
+static int feature_button_h(void) {
+    return start_button_h();
+}
+
+static int quick_button_x(void) {
+    return feature_button_x() + feature_button_w() + 6;
+}
+
+static int quick_button_y(void) {
+    return start_button_y();
+}
+
+static int quick_button_w(void) {
+    return 74;
+}
+
+static int quick_button_h(void) {
+    return start_button_h();
+}
+
+static int notify_button_x(void) {
+    return quick_button_x() + quick_button_w() + 6;
+}
+
+static int notify_button_y(void) {
+    return start_button_y();
+}
+
+static int notify_button_w(void) {
+    return 72;
+}
+
+static int notify_button_h(void) {
+    return start_button_h();
 }
 
 static void draw_dock(int w, int h) {
@@ -790,15 +1300,15 @@ static void draw_dock(int w, int h) {
         ix + DOCK_ICON_W / 2,
         apps_y + 18,
         14,
-        start_menu_open ? 0x00f5bf56 : 0x005ad8ff,
-        start_menu_open ? 0x00e4942f : 0x0035a6ff,
-        start_menu_open ? 0x009a4d1f : 0x00235eb5,
-        start_menu_open
+        launcher_open ? 0x00f5bf56 : 0x005ad8ff,
+        launcher_open ? 0x00e4942f : 0x0035a6ff,
+        launcher_open ? 0x009a4d1f : 0x00235eb5,
+        launcher_open
     );
     fb_fill_rect(ix + DOCK_ICON_W / 2 - 1, apps_y + 12, 2, 12, 0x00ffffff);
     fb_fill_rect(ix + DOCK_ICON_W / 2 - 6, apps_y + 17, 12, 2, 0x00ffffff);
 
-    if (start_menu_open) {
+    if (launcher_open) {
         fb_fill_rect(ix + 13, apps_y + DOCK_ICON_H + 2, DOCK_ICON_W - 26, 2, 0x00bfe7ff);
     }
 }
@@ -987,6 +1497,432 @@ static int context_menu_action_at(int mx, int my) {
     return -2;
 }
 
+static int launcher_x(void) {
+    int w = (int)fb_width();
+    int lw = w - 180;
+    if (lw > 980) {
+        lw = 980;
+    }
+    if (lw < 640) {
+        lw = 640;
+    }
+    return (w - lw) / 2;
+}
+
+static int launcher_y(void) {
+    return TOP_BAR_H + 24;
+}
+
+static int launcher_w(void) {
+    int w = (int)fb_width() - 180;
+    if (w > 980) {
+        w = 980;
+    }
+    if (w < 640) {
+        w = 640;
+    }
+    return w;
+}
+
+static int launcher_h(void) {
+    int h = (int)fb_height() - TOP_BAR_H - 60;
+    if (h > 620) {
+        h = 620;
+    }
+    if (h < 360) {
+        h = 360;
+    }
+    return h;
+}
+
+static int launcher_row_y(int row) {
+    return launcher_y() + 108 + row * 30;
+}
+
+static int launcher_row_h(void) {
+    return 26;
+}
+
+static void draw_launcher_panel(void) {
+    if (!launcher_open) {
+        return;
+    }
+
+    launcher_refresh_apps(0);
+    launcher_clamp_page();
+
+    int x = launcher_x();
+    int y = launcher_y();
+    int w = launcher_w();
+    int h = launcher_h();
+    int list_w = w - 280;
+
+    fb_fill_rect(x, y, w, h, 0x00141f2f);
+    fb_fill_rect(x, y, w, 1, 0x0088b4df);
+    fb_fill_rect(x, y + h - 1, w, 1, 0x00060b12);
+    fb_fill_rect(x + 1, y + 1, w - 2, 36, 0x00253750);
+    fb_draw_text(x + 16, y + 12, "Application Launcher", 0x00eff8ff, 0x00253750);
+
+    int close_x = x + w - 28;
+    fb_fill_rect(close_x, y + 8, 16, 16, 0x00b45858);
+    fb_draw_text(close_x + 5, y + 12, "x", 0x00ffffff, 0x00b45858);
+
+    const char *tabs[3] = {"All", "Native", "Ecosystem"};
+    for (int i = 0; i < 3; i++) {
+        int tx = x + 16 + i * 114;
+        uint32_t bg = (launcher_category == i) ? 0x00487eb9 : 0x00243a52;
+        fb_fill_rect(tx, y + 46, 104, 24, bg);
+        fb_draw_text(tx + 14, y + 54, tabs[i], 0x00e7f1ff, bg);
+    }
+
+    char stats[52];
+    char nbuf[12];
+    stats[0] = '\0';
+    nbuf[0] = '\0';
+    u32_to_dec((uint32_t)launcher_count, nbuf, sizeof(nbuf));
+    strncat(stats, "Installed: ", sizeof(stats) - strlen(stats) - 1);
+    strncat(stats, nbuf, sizeof(stats) - strlen(stats) - 1);
+    fb_draw_text(x + 370, y + 54, stats, 0x00b9d2e8, 0x00141f2f);
+
+    int page_count = launcher_page_count();
+    char pbuf[28];
+    char cur[8];
+    char total[8];
+    pbuf[0] = '\0';
+    cur[0] = '\0';
+    total[0] = '\0';
+    u32_to_dec((uint32_t)(launcher_page + 1), cur, sizeof(cur));
+    u32_to_dec((uint32_t)page_count, total, sizeof(total));
+    strncat(pbuf, "Page ", sizeof(pbuf) - strlen(pbuf) - 1);
+    strncat(pbuf, cur, sizeof(pbuf) - strlen(pbuf) - 1);
+    strncat(pbuf, "/", sizeof(pbuf) - strlen(pbuf) - 1);
+    strncat(pbuf, total, sizeof(pbuf) - strlen(pbuf) - 1);
+    fb_draw_text(x + w - 126, y + 54, pbuf, 0x00b9d2e8, 0x00141f2f);
+
+    int prev_x = x + w - 170;
+    int next_x = x + w - 82;
+    fb_fill_rect(prev_x, y + 46, 34, 24, 0x00243a52);
+    fb_fill_rect(next_x, y + 46, 34, 24, 0x00243a52);
+    fb_draw_text(prev_x + 12, y + 54, "<", 0x00e7f1ff, 0x00243a52);
+    fb_draw_text(next_x + 12, y + 54, ">", 0x00e7f1ff, 0x00243a52);
+
+    fb_fill_rect(x + 12, y + 80, list_w, h - 94, 0x00192334);
+    fb_fill_rect(x + 12, y + 80, list_w, 1, 0x005f83ad);
+
+    int detail_x = x + list_w + 24;
+    int detail_w = w - list_w - 36;
+    fb_fill_rect(detail_x, y + 80, detail_w, h - 94, 0x001a2739);
+    fb_fill_rect(detail_x, y + 80, detail_w, 1, 0x005f83ad);
+    fb_draw_text(detail_x + 12, y + 94, "App Details", 0x00e4f0fc, 0x001a2739);
+
+    int visible = launcher_build_index_view();
+    int start = launcher_page * LAUNCHER_ROWS_PER_PAGE;
+    for (int row = 0; row < LAUNCHER_ROWS_PER_PAGE; row++) {
+        int pos = start + row;
+        if (pos >= visible) {
+            break;
+        }
+        int app_idx = launcher_index_view[pos];
+        int ry = launcher_row_y(row);
+        uint32_t rc = (app_idx == launcher_selected) ? 0x00385277 : (((row & 1) == 0) ? 0x001f2c42 : 0x001b2738);
+
+        fb_fill_rect(x + 20, ry, list_w - 16, launcher_row_h(), rc);
+        fb_draw_text(x + 28, ry + 9, launcher_apps[app_idx], 0x00d6e6f7, rc);
+
+        int run_x = x + list_w - 64;
+        fb_fill_rect(run_x, ry + 4, 44, 18, 0x003f7f5b);
+        fb_draw_text(run_x + 12, ry + 9, "Run", 0x00e5f8ec, 0x003f7f5b);
+    }
+
+    if (launcher_selected >= 0 && launcher_selected < launcher_count) {
+        const char *name = launcher_apps[launcher_selected];
+        char line0[96];
+        char line1[96];
+        line0[0] = '\0';
+        line1[0] = '\0';
+        strncat(line0, "Name: ", sizeof(line0) - strlen(line0) - 1);
+        strncat(line0, name, sizeof(line0) - strlen(line0) - 1);
+        strncat(line1, "Type: ", sizeof(line1) - strlen(line1) - 1);
+        strncat(line1, app_is_ecosystem_name(name) ? "ecosystem app" : "native app", sizeof(line1) - strlen(line1) - 1);
+
+        fb_draw_text(detail_x + 12, y + 112, line0, 0x00c8d9ec, 0x001a2739);
+        fb_draw_text(detail_x + 12, y + 124, line1, 0x00c8d9ec, 0x001a2739);
+        fb_draw_text(detail_x + 12, y + 148, "Click Run on any row to launch.", 0x00adc5dd, 0x001a2739);
+        fb_draw_text(detail_x + 12, y + 160, "Requires active license key.", 0x00adc5dd, 0x001a2739);
+
+        fb_fill_rect(detail_x + 12, y + 188, detail_w - 24, 50, 0x00213046);
+        fb_draw_text(detail_x + 20, y + 204, "Catalog scale:", 0x00d3e5f7, 0x00213046);
+        fb_draw_text(detail_x + 20, y + 216, "supports hundreds of apps.", 0x00d3e5f7, 0x00213046);
+    }
+}
+
+static int launcher_row_hit(int mx, int my, int *app_idx, int *run_button) {
+    int x = launcher_x();
+    int y = launcher_y();
+    int w = launcher_w();
+    int h = launcher_h();
+    int list_w = w - 280;
+    int visible = launcher_build_index_view();
+    int start = launcher_page * LAUNCHER_ROWS_PER_PAGE;
+
+    if (!point_in_rect(mx, my, x, y, w, h)) {
+        return 0;
+    }
+
+    for (int row = 0; row < LAUNCHER_ROWS_PER_PAGE; row++) {
+        int pos = start + row;
+        if (pos >= visible) {
+            break;
+        }
+        int ry = launcher_row_y(row);
+        if (point_in_rect(mx, my, x + 20, ry, list_w - 16, launcher_row_h())) {
+            if (app_idx) {
+                *app_idx = launcher_index_view[pos];
+            }
+            if (run_button) {
+                *run_button = point_in_rect(mx, my, x + list_w - 64, ry + 4, 44, 18) ? 1 : 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int feature_hub_x(void) {
+    int w = (int)fb_width() - 120;
+    if (w > 1080) {
+        w = 1080;
+    }
+    if (w < 720) {
+        w = 720;
+    }
+    return ((int)fb_width() - w) / 2;
+}
+
+static int feature_hub_y(void) {
+    return TOP_BAR_H + 18;
+}
+
+static int feature_hub_w(void) {
+    int w = (int)fb_width() - 120;
+    if (w > 1080) {
+        w = 1080;
+    }
+    if (w < 720) {
+        w = 720;
+    }
+    return w;
+}
+
+static int feature_hub_h(void) {
+    int h = (int)fb_height() - TOP_BAR_H - 44;
+    if (h > 650) {
+        h = 650;
+    }
+    if (h < 420) {
+        h = 420;
+    }
+    return h;
+}
+
+static void draw_feature_hub_panel(void) {
+    if (!feature_hub_open) {
+        return;
+    }
+
+    feature_clamp_page();
+
+    int x = feature_hub_x();
+    int y = feature_hub_y();
+    int w = feature_hub_w();
+    int h = feature_hub_h();
+    int side_w = 204;
+
+    fb_fill_rect(x, y, w, h, 0x00172334);
+    fb_fill_rect(x, y, w, 1, 0x00ad88ff);
+    fb_fill_rect(x, y + h - 1, w, 1, 0x00060a11);
+    fb_fill_rect(x + 1, y + 1, w - 2, 36, 0x00273a5f);
+    fb_draw_text(x + 14, y + 12, "Feature Center - 960 Working Features", 0x00f1f7ff, 0x00273a5f);
+
+    int close_x = x + w - 26;
+    fb_fill_rect(close_x, y + 8, 14, 16, 0x00b45858);
+    fb_draw_text(close_x + 4, y + 12, "x", 0x00ffffff, 0x00b45858);
+
+    fb_fill_rect(x + 12, y + 48, side_w, h - 60, 0x001d2a3e);
+    fb_fill_rect(x + 12, y + 48, side_w, 1, 0x00698eb5);
+    fb_draw_text(x + 20, y + 60, "Categories", 0x00d8e7f9, 0x001d2a3e);
+
+    int row_y = y + 76;
+    for (int i = 0; i <= FEATURE_CATEGORY_COUNT; i++) {
+        int cat = (i == 0) ? FEATURE_CATEGORY_ALL : (i - 1);
+        const char *name = (cat == FEATURE_CATEGORY_ALL) ? "All Features" : feature_category_name(cat);
+        uint32_t rc = (feature_category == cat) ? 0x00425986 : 0x0023344e;
+        fb_fill_rect(x + 18, row_y, side_w - 12, 24, rc);
+        fb_draw_text(x + 22, row_y + 8, name, 0x00dbe9fa, rc);
+        row_y += 26;
+        if (row_y + 24 > y + h - 24) {
+            break;
+        }
+    }
+
+    int main_x = x + side_w + 24;
+    int main_w = w - side_w - 36;
+    fb_fill_rect(main_x, y + 48, main_w, h - 60, 0x00182231);
+    fb_fill_rect(main_x, y + 48, main_w, 1, 0x00698eb5);
+
+    int enabled = feature_enabled_count();
+    char line[48];
+    char a[8];
+    line[0] = '\0';
+    a[0] = '\0';
+    u32_to_dec((uint32_t)enabled, a, sizeof(a));
+    strncat(line, "Enabled ", sizeof(line) - strlen(line) - 1);
+    strncat(line, a, sizeof(line) - strlen(line) - 1);
+    strncat(line, "/960", sizeof(line) - strlen(line) - 1);
+    fb_draw_text(main_x + 10, y + 60, line, 0x00d0e2f6, 0x00182231);
+
+    int page_count = feature_page_count();
+    char page_text[24];
+    char p0[8];
+    char p1[8];
+    page_text[0] = '\0';
+    p0[0] = '\0';
+    p1[0] = '\0';
+    u32_to_dec((uint32_t)(feature_page + 1), p0, sizeof(p0));
+    u32_to_dec((uint32_t)page_count, p1, sizeof(p1));
+    strncat(page_text, "Page ", sizeof(page_text) - strlen(page_text) - 1);
+    strncat(page_text, p0, sizeof(page_text) - strlen(page_text) - 1);
+    strncat(page_text, "/", sizeof(page_text) - strlen(page_text) - 1);
+    strncat(page_text, p1, sizeof(page_text) - strlen(page_text) - 1);
+    fb_draw_text(main_x + main_w - 96, y + 60, page_text, 0x00c7dbf0, 0x00182231);
+
+    int btn_y = y + 84;
+    fb_fill_rect(main_x + 10, btn_y, 82, 22, 0x003c7a56);
+    fb_fill_rect(main_x + 96, btn_y, 90, 22, 0x00724b52);
+    fb_fill_rect(main_x + 190, btn_y, 84, 22, 0x0052608c);
+    fb_fill_rect(main_x + main_w - 96, btn_y, 36, 22, 0x00293d57);
+    fb_fill_rect(main_x + main_w - 54, btn_y, 36, 22, 0x00293d57);
+    fb_draw_text(main_x + 18, btn_y + 8, "Enable", 0x00e3f6ea, 0x003c7a56);
+    fb_draw_text(main_x + 102, btn_y + 8, "Disable", 0x00f3e5e6, 0x00724b52);
+    fb_draw_text(main_x + 204, btn_y + 8, "Toggle", 0x00dce5ff, 0x0052608c);
+    fb_draw_text(main_x + main_w - 83, btn_y + 8, "<", 0x00dce5ff, 0x00293d57);
+    fb_draw_text(main_x + main_w - 41, btn_y + 8, ">", 0x00dce5ff, 0x00293d57);
+
+    int total = feature_filtered_count();
+    int start = feature_page * FEATURE_ROWS_PER_PAGE;
+    int fy = y + 116;
+    for (int i = 0; i < FEATURE_ROWS_PER_PAGE; i++) {
+        int filtered_idx = start + i;
+        if (filtered_idx >= total) {
+            break;
+        }
+        int gidx = feature_global_index_from_filtered(filtered_idx);
+        char name[FEATURE_MAX_NAME];
+        char idbuf[12];
+        name[0] = '\0';
+        idbuf[0] = '\0';
+        feature_compose_name(gidx, name, sizeof(name));
+        u32_to_dec((uint32_t)(gidx + 1), idbuf, sizeof(idbuf));
+
+        uint32_t rowc = (gidx == feature_selected) ? 0x00334b77 : (((i & 1) == 0) ? 0x001f2a40 : 0x001a2437);
+        fb_fill_rect(main_x + 10, fy, main_w - 20, 24, rowc);
+        fb_draw_text(main_x + 16, fy + 8, idbuf, 0x00bfd2e8, rowc);
+        fb_draw_text(main_x + 56, fy + 8, name, 0x00d8e7f7, rowc);
+
+        int tx = main_x + main_w - 104;
+        uint32_t toggle = feature_enabled[gidx] ? 0x003f7f58 : 0x006f4b53;
+        fb_fill_rect(tx, fy + 4, 74, 16, toggle);
+        fb_draw_text(tx + 16, fy + 8, feature_enabled[gidx] ? "ON" : "OFF", 0x00f0fbf5, toggle);
+
+        fy += 26;
+    }
+}
+
+static void draw_quick_panel(void) {
+    if (!quick_panel_open) {
+        return;
+    }
+
+    int w = 286;
+    int h = 230;
+    int x = (int)fb_width() - w - 16;
+    int y = TOP_BAR_H + 14;
+    fb_fill_rect(x, y, w, h, 0x00172233);
+    fb_fill_rect(x, y, w, 1, 0x0087aed5);
+    fb_draw_text(x + 12, y + 12, "Quick Settings", 0x00eaf2fb, 0x00172233);
+
+    fb_fill_rect(x + 12, y + 34, w - 24, 24, overlay ? 0x003d7f5d : 0x006b4850);
+    fb_draw_text(x + 18, y + 42, overlay ? "CLI Overlay: ON" : "CLI Overlay: OFF", 0x00eaf2fb, overlay ? 0x003d7f5d : 0x006b4850);
+
+    fb_fill_rect(x + 12, y + 62, w - 24, 24, show_desktop_mode ? 0x00355f86 : 0x003c5369);
+    fb_draw_text(x + 18, y + 70, show_desktop_mode ? "Desktop Focus: ON" : "Desktop Focus: OFF", 0x00eaf2fb, show_desktop_mode ? 0x00355f86 : 0x003c5369);
+
+    fb_fill_rect(x + 12, y + 90, w - 24, 24, launcher_open ? 0x003f5a86 : 0x002f4259);
+    fb_draw_text(x + 18, y + 98, launcher_open ? "Launcher: OPEN" : "Launcher: CLOSED", 0x00eaf2fb, launcher_open ? 0x003f5a86 : 0x002f4259);
+
+    fb_fill_rect(x + 12, y + 118, w - 24, 24, feature_hub_open ? 0x00564990 : 0x00353f62);
+    fb_draw_text(x + 18, y + 126, feature_hub_open ? "Feature Center: OPEN" : "Feature Center: CLOSED", 0x00eaf2fb, feature_hub_open ? 0x00564990 : 0x00353f62);
+
+    fb_fill_rect(x + 12, y + 156, 120, 24, 0x003c7a56);
+    fb_fill_rect(x + 136, y + 156, 120, 24, 0x006b4b52);
+    fb_draw_text(x + 26, y + 164, "Enable All", 0x00eaf2fb, 0x003c7a56);
+    fb_draw_text(x + 156, y + 164, "Disable All", 0x00eaf2fb, 0x006b4b52);
+
+    fb_fill_rect(x + 12, y + 188, w - 24, 28, 0x00243043);
+    fb_draw_text(x + 18, y + 198, "Hint: use Launcher for app search + run", 0x00bfd2e7, 0x00243043);
+}
+
+static void draw_notification_toasts(void) {
+    uint64_t now = pit_ticks();
+    int shown = 0;
+    int max_toast = 4;
+    int toast_w = 300;
+    int x = (int)fb_width() - toast_w - 16;
+    int y = TOP_BAR_H + 18;
+
+    for (int i = 0; i < notify_count && shown < max_toast; i++) {
+        int idx = (notify_write_idx - 1 - i + NOTIFY_MAX) % NOTIFY_MAX;
+        gui_notification_t *n = &notifications[idx];
+        if (n->tick == 0 || now - n->tick > 900) {
+            continue;
+        }
+        uint32_t bg = rgb_mix(0x00192638, n->color, 72);
+        fb_fill_rect(x, y + shown * 30, toast_w, 24, bg);
+        fb_draw_text(x + 10, y + shown * 30 + 8, n->text, 0x00e7f1fb, bg);
+        shown++;
+    }
+}
+
+static void draw_notifications_panel(void) {
+    if (!notifications_open) {
+        return;
+    }
+
+    int w = 380;
+    int h = 320;
+    int x = (int)fb_width() - w - 16;
+    int y = TOP_BAR_H + 14;
+    fb_fill_rect(x, y, w, h, 0x00162231);
+    fb_fill_rect(x, y, w, 1, 0x00e5b884);
+    fb_draw_text(x + 12, y + 12, "Alerts", 0x00fff2df, 0x00162231);
+
+    int row_y = y + 34;
+    for (int i = 0; i < notify_count; i++) {
+        int idx = (notify_write_idx - 1 - i + NOTIFY_MAX) % NOTIFY_MAX;
+        gui_notification_t *n = &notifications[idx];
+        if (n->tick == 0) {
+            continue;
+        }
+        if (row_y + 22 > y + h - 10) {
+            break;
+        }
+        uint32_t bg = rgb_mix(0x001b2a3e, n->color, 64);
+        fb_fill_rect(x + 10, row_y, w - 20, 20, bg);
+        fb_draw_text(x + 16, row_y + 7, n->text, 0x00edf5ff, bg);
+        row_y += 22;
+    }
+}
+
 static int window_control_at(const window_t *w, int x, int y) {
     int by = w->y + 7;
     if (point_in_rect(x, y, w->x + 8, by, 11, 11)) {
@@ -1016,11 +1952,14 @@ static void draw_window_content(const window_t *w) {
     if (w->kind == WINDOW_MONITOR) {
         char t0[16];
         char t1[16];
+        char t2[16];
         u32_to_dec((uint32_t)(pit_ticks() / 100u), t0, sizeof(t0));
         u32_to_dec((uint32_t)window_count, t1, sizeof(t1));
+        u32_to_dec((uint32_t)feature_enabled_count(), t2, sizeof(t2));
 
         char line0[48];
         char line1[48];
+        char line2[56];
 
         line0[0] = '\0';
         strncat(line0, "uptime(s): ", sizeof(line0) - strlen(line0) - 1);
@@ -1030,18 +1969,25 @@ static void draw_window_content(const window_t *w) {
         strncat(line1, "windows: ", sizeof(line1) - strlen(line1) - 1);
         strncat(line1, t1, sizeof(line1) - strlen(line1) - 1);
 
+        line2[0] = '\0';
+        strncat(line2, "features enabled: ", sizeof(line2) - strlen(line2) - 1);
+        strncat(line2, t2, sizeof(line2) - strlen(line2) - 1);
+        strncat(line2, "/960", sizeof(line2) - strlen(line2) - 1);
+
         fb_draw_text(tx, ty, "Kernel monitor", 0x00dde9f5, w->color);
         fb_draw_text(tx, ty + 12, line0, 0x00b7cce0, w->color);
         fb_draw_text(tx, ty + 24, line1, 0x00b7cce0, w->color);
-        fb_draw_text(tx, ty + 36, "Round-robin scheduler active", 0x00b7cce0, w->color);
+        fb_draw_text(tx, ty + 36, line2, 0x00b7cce0, w->color);
+        fb_draw_text(tx, ty + 48, "Round-robin scheduler active", 0x00b7cce0, w->color);
         return;
     }
 
     if (w->kind == WINDOW_TERMINAL) {
         fb_draw_text(tx, ty, "Shell shortcuts", 0x00dde9f5, w->color);
         fb_draw_text(tx, ty + 12, "help, apps, run /bin/greeter", 0x00b7cce0, w->color);
-        fb_draw_text(tx, ty + 24, "gui toggles CLI overlay", 0x00b7cce0, w->color);
-        fb_draw_text(tx, ty + 36, "tcpsend / ping / netinfo", 0x00b7cce0, w->color);
+        fb_draw_text(tx, ty + 24, "Launcher button: browse and run apps", 0x00b7cce0, w->color);
+        fb_draw_text(tx, ty + 36, "Features button: manage 960 toggles", 0x00b7cce0, w->color);
+        fb_draw_text(tx, ty + 48, "tcpsend / ping / netinfo", 0x00b7cce0, w->color);
         return;
     }
 
@@ -1180,7 +2126,7 @@ static void draw_cursor(const mouse_state_t *m) {
         "             XX "
     };
 
-    uint32_t border = 0x00040a12;
+    uint32_t border = 0x0010182a;
     uint32_t fill = (m->left || m->right || m->middle) ? 0x00c8e2ff : 0x00f7fbff;
     uint32_t shadow = 0x00090f17;
 
@@ -1223,6 +2169,11 @@ static void gui_redraw(const mouse_state_t *mouse) {
     draw_snap_preview();
     draw_start_menu();
     draw_context_menu();
+    draw_quick_panel();
+    draw_launcher_panel();
+    draw_feature_hub_panel();
+    draw_notifications_panel();
+    draw_notification_toasts();
 
     if (overlay) {
         console_render();
@@ -1315,9 +2266,35 @@ void gui_init(void) {
     context_menu_x = 0;
     context_menu_y = 0;
     show_desktop_mode = 0;
+    launcher_open = 0;
+    launcher_category = LAUNCHER_CAT_ALL;
+    launcher_page = 0;
+    launcher_selected = 0;
+    launcher_count = 0;
+    launcher_last_refresh_tick = 0;
+    feature_hub_open = 0;
+    feature_category = FEATURE_CATEGORY_ALL;
+    feature_page = 0;
+    feature_selected = 0;
+    for (int i = 0; i < FEATURE_TOTAL; i++) {
+        feature_enabled[i] = ((i % 3) == 0 || (i % 7) == 0) ? 1u : 0u;
+    }
+    quick_panel_open = 0;
+    notifications_open = 0;
+    notify_count = 0;
+    notify_write_idx = 0;
+    for (int i = 0; i < NOTIFY_MAX; i++) {
+        notifications[i].text[0] = '\0';
+        notifications[i].color = 0x002a3e5a;
+        notifications[i].tick = 0;
+    }
     for (int i = 0; i < MAX_WINDOWS; i++) {
         desktop_hidden[i] = 0;
     }
+
+    gui_notify_push("QuartzOS desktop initialized", 0x0074c2ff);
+    gui_notify_push("Feature Center online (960 features)", 0x00957ff5);
+    gui_notify_push("Launcher ready: click Launcher", 0x008acfa3);
 
     mouse_state_t mouse = mouse_get_state();
     mouse_prev_left = mouse.left ? 1 : 0;
@@ -1340,6 +2317,21 @@ static void run_start_action(int action) {
         window_focus_kind(WINDOW_FILES);
     } else if (action == START_ACTION_NETWORK) {
         window_focus_kind(WINDOW_NETWORK);
+    } else if (action == START_ACTION_OPEN_LAUNCHER) {
+        launcher_open = !launcher_open;
+        launcher_refresh_apps(1);
+        quick_panel_open = 0;
+        notifications_open = 0;
+    } else if (action == START_ACTION_OPEN_FEATURE_HUB) {
+        feature_hub_open = !feature_hub_open;
+        launcher_open = 0;
+        quick_panel_open = 0;
+        notifications_open = 0;
+    } else if (action == START_ACTION_OPEN_QUICK_PANEL) {
+        quick_panel_open = !quick_panel_open;
+        launcher_open = 0;
+        feature_hub_open = 0;
+        notifications_open = 0;
     } else if (action == START_ACTION_OVERLAY) {
         overlay = !overlay;
     } else if (action == START_ACTION_RESTORE_ALL) {
@@ -1377,6 +2369,10 @@ void gui_tick(void) {
         context_menu_y = mouse.y;
         context_menu_clamp_position();
         start_menu_open = 0;
+        launcher_open = 0;
+        feature_hub_open = 0;
+        quick_panel_open = 0;
+        notifications_open = 0;
         drag_index = -1;
         drag_snap_mode = SNAP_NONE;
         dirty = 1;
@@ -1413,8 +2409,269 @@ void gui_tick(void) {
         if (!handled && point_in_rect(mouse.x, mouse.y, start_button_x(), start_button_y(), start_button_w(), start_button_h())) {
             start_menu_open = !start_menu_open;
             context_menu_open = 0;
+            launcher_open = 0;
+            feature_hub_open = 0;
+            quick_panel_open = 0;
+            notifications_open = 0;
             handled = 1;
             dirty = 1;
+        }
+
+        if (!handled && point_in_rect(mouse.x, mouse.y, launcher_button_x(), launcher_button_y(), launcher_button_w(), launcher_button_h())) {
+            launcher_open = !launcher_open;
+            feature_hub_open = 0;
+            quick_panel_open = 0;
+            notifications_open = 0;
+            start_menu_open = 0;
+            launcher_refresh_apps(1);
+            handled = 1;
+            dirty = 1;
+        }
+
+        if (!handled && point_in_rect(mouse.x, mouse.y, feature_button_x(), feature_button_y(), feature_button_w(), feature_button_h())) {
+            feature_hub_open = !feature_hub_open;
+            launcher_open = 0;
+            quick_panel_open = 0;
+            notifications_open = 0;
+            start_menu_open = 0;
+            handled = 1;
+            dirty = 1;
+        }
+
+        if (!handled && point_in_rect(mouse.x, mouse.y, quick_button_x(), quick_button_y(), quick_button_w(), quick_button_h())) {
+            quick_panel_open = !quick_panel_open;
+            start_menu_open = 0;
+            context_menu_open = 0;
+            launcher_open = 0;
+            feature_hub_open = 0;
+            notifications_open = 0;
+            handled = 1;
+            dirty = 1;
+        }
+
+        if (!handled && point_in_rect(mouse.x, mouse.y, notify_button_x(), notify_button_y(), notify_button_w(), notify_button_h())) {
+            notifications_open = !notifications_open;
+            start_menu_open = 0;
+            context_menu_open = 0;
+            launcher_open = 0;
+            feature_hub_open = 0;
+            quick_panel_open = 0;
+            handled = 1;
+            dirty = 1;
+        }
+
+        if (!handled && launcher_open) {
+            int x = launcher_x();
+            int y = launcher_y();
+            int w = launcher_w();
+            int h = launcher_h();
+
+            if (!point_in_rect(mouse.x, mouse.y, x, y, w, h)) {
+                launcher_open = 0;
+                dirty = 1;
+                handled = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + w - 28, y + 8, 16, 16)) {
+                launcher_open = 0;
+                dirty = 1;
+                handled = 1;
+            } else {
+                for (int i = 0; i < 3 && !handled; i++) {
+                    int tx = x + 16 + i * 114;
+                    if (point_in_rect(mouse.x, mouse.y, tx, y + 46, 104, 24)) {
+                        launcher_category = i;
+                        launcher_page = 0;
+                        launcher_clamp_page();
+                        handled = 1;
+                        dirty = 1;
+                    }
+                }
+
+                if (!handled && point_in_rect(mouse.x, mouse.y, x + w - 170, y + 46, 34, 24)) {
+                    launcher_page--;
+                    launcher_clamp_page();
+                    handled = 1;
+                    dirty = 1;
+                }
+                if (!handled && point_in_rect(mouse.x, mouse.y, x + w - 82, y + 46, 34, 24)) {
+                    launcher_page++;
+                    launcher_clamp_page();
+                    handled = 1;
+                    dirty = 1;
+                }
+
+                if (!handled) {
+                    int app_idx = -1;
+                    int run_button = 0;
+                    if (launcher_row_hit(mouse.x, mouse.y, &app_idx, &run_button)) {
+                        launcher_selected = app_idx;
+                        handled = 1;
+                        dirty = 1;
+                        if (run_button) {
+                            if (gui_launch_app(launcher_apps[app_idx])) {
+                                launcher_open = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!handled && feature_hub_open) {
+            int x = feature_hub_x();
+            int y = feature_hub_y();
+            int w = feature_hub_w();
+            int h = feature_hub_h();
+            int side_w = 204;
+            int main_x = x + side_w + 24;
+            int main_w = w - side_w - 36;
+
+            if (!point_in_rect(mouse.x, mouse.y, x, y, w, h)) {
+                feature_hub_open = 0;
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + w - 26, y + 8, 14, 16)) {
+                feature_hub_open = 0;
+                handled = 1;
+                dirty = 1;
+            } else {
+                int row_y = y + 76;
+                for (int i = 0; i <= FEATURE_CATEGORY_COUNT; i++) {
+                    int cat = (i == 0) ? FEATURE_CATEGORY_ALL : (i - 1);
+                    if (point_in_rect(mouse.x, mouse.y, x + 18, row_y, side_w - 12, 24)) {
+                        feature_category = cat;
+                        feature_page = 0;
+                        feature_clamp_page();
+                        handled = 1;
+                        dirty = 1;
+                        break;
+                    }
+                    row_y += 26;
+                    if (row_y + 24 > y + h - 24) {
+                        break;
+                    }
+                }
+
+                int btn_y = y + 84;
+                if (!handled && point_in_rect(mouse.x, mouse.y, main_x + 10, btn_y, 82, 22)) {
+                    feature_set_page_state(1);
+                    gui_notify_push("Feature page enabled", 0x0080d8a2);
+                    handled = 1;
+                    dirty = 1;
+                }
+                if (!handled && point_in_rect(mouse.x, mouse.y, main_x + 96, btn_y, 90, 22)) {
+                    feature_set_page_state(0);
+                    gui_notify_push("Feature page disabled", 0x00d18992);
+                    handled = 1;
+                    dirty = 1;
+                }
+                if (!handled && point_in_rect(mouse.x, mouse.y, main_x + 190, btn_y, 84, 22)) {
+                    int total = feature_filtered_count();
+                    int start = feature_page * FEATURE_ROWS_PER_PAGE;
+                    for (int i = 0; i < FEATURE_ROWS_PER_PAGE; i++) {
+                        int fi = start + i;
+                        if (fi >= total) {
+                            break;
+                        }
+                        int gidx = feature_global_index_from_filtered(fi);
+                        feature_enabled[gidx] = feature_enabled[gidx] ? 0u : 1u;
+                    }
+                    gui_notify_push("Feature page toggled", 0x00999cf0);
+                    handled = 1;
+                    dirty = 1;
+                }
+                if (!handled && point_in_rect(mouse.x, mouse.y, main_x + main_w - 96, btn_y, 36, 22)) {
+                    feature_page--;
+                    feature_clamp_page();
+                    handled = 1;
+                    dirty = 1;
+                }
+                if (!handled && point_in_rect(mouse.x, mouse.y, main_x + main_w - 54, btn_y, 36, 22)) {
+                    feature_page++;
+                    feature_clamp_page();
+                    handled = 1;
+                    dirty = 1;
+                }
+
+                if (!handled) {
+                    int total = feature_filtered_count();
+                    int start = feature_page * FEATURE_ROWS_PER_PAGE;
+                    int fy = y + 116;
+                    for (int i = 0; i < FEATURE_ROWS_PER_PAGE; i++) {
+                        int fi = start + i;
+                        if (fi >= total) {
+                            break;
+                        }
+                        int gidx = feature_global_index_from_filtered(fi);
+                        if (point_in_rect(mouse.x, mouse.y, main_x + 10, fy, main_w - 20, 24)) {
+                            feature_selected = gidx;
+                            if (point_in_rect(mouse.x, mouse.y, main_x + main_w - 104, fy + 4, 74, 16)) {
+                                feature_enabled[gidx] = feature_enabled[gidx] ? 0u : 1u;
+                            }
+                            handled = 1;
+                            dirty = 1;
+                            break;
+                        }
+                        fy += 26;
+                    }
+                }
+            }
+        }
+
+        if (!handled && quick_panel_open) {
+            int w = 286;
+            int h = 230;
+            int x = (int)fb_width() - w - 16;
+            int y = TOP_BAR_H + 14;
+            if (!point_in_rect(mouse.x, mouse.y, x, y, w, h)) {
+                quick_panel_open = 0;
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 34, w - 24, 24)) {
+                overlay = !overlay;
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 62, w - 24, 24)) {
+                show_desktop_toggle();
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 90, w - 24, 24)) {
+                launcher_open = !launcher_open;
+                if (launcher_open) {
+                    launcher_refresh_apps(1);
+                }
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 118, w - 24, 24)) {
+                feature_hub_open = !feature_hub_open;
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 156, 120, 24)) {
+                for (int i = 0; i < FEATURE_TOTAL; i++) {
+                    feature_enabled[i] = 1;
+                }
+                gui_notify_push("All features enabled", 0x0080d8a2);
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 136, y + 156, 120, 24)) {
+                for (int i = 0; i < FEATURE_TOTAL; i++) {
+                    feature_enabled[i] = 0;
+                }
+                gui_notify_push("All features disabled", 0x00d18992);
+                handled = 1;
+                dirty = 1;
+            }
+        }
+
+        if (!handled && notifications_open) {
+            int w = 380;
+            int h = 320;
+            int x = (int)fb_width() - w - 16;
+            int y = TOP_BAR_H + 14;
+            if (!point_in_rect(mouse.x, mouse.y, x, y, w, h)) {
+                notifications_open = 0;
+                handled = 1;
+                dirty = 1;
+            }
         }
 
         if (!handled && start_menu_open) {
@@ -1435,8 +2692,15 @@ void gui_tick(void) {
         if (!handled) {
             int dock_icon = dock_icon_at(mouse.x, mouse.y);
             if (dock_icon == MAX_WINDOWS) {
-                start_menu_open = !start_menu_open;
+                launcher_open = !launcher_open;
+                if (launcher_open) {
+                    launcher_refresh_apps(1);
+                }
+                feature_hub_open = 0;
+                quick_panel_open = 0;
+                notifications_open = 0;
                 context_menu_open = 0;
+                start_menu_open = 0;
                 handled = 1;
                 dirty = 1;
             } else if (dock_icon >= 0 && dock_icon < MAX_WINDOWS) {

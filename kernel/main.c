@@ -194,6 +194,70 @@ static const boot_profile_t PROFILE_PERF = {
     .net_policy = SERVICE_POLICY_ALWAYS
 };
 
+static void boot_splash(const char *phase, uint32_t step, uint32_t total) {
+    uint32_t w = fb_width();
+    uint32_t h = fb_height();
+    if (w == 0 || h == 0) {
+        return;
+    }
+
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t c0 = 0x00142539;
+        uint32_t c1 = 0x0009121f;
+        uint32_t t = (y * 255u) / h;
+        uint32_t r = (((c0 >> 16) & 0xFFu) * (255u - t) + ((c1 >> 16) & 0xFFu) * t) / 255u;
+        uint32_t g = (((c0 >> 8) & 0xFFu) * (255u - t) + ((c1 >> 8) & 0xFFu) * t) / 255u;
+        uint32_t b = ((c0 & 0xFFu) * (255u - t) + (c1 & 0xFFu) * t) / 255u;
+        fb_fill_rect(0, (int)y, (int)w, 1, (r << 16) | (g << 8) | b);
+    }
+
+    const int card_w = 620;
+    const int card_h = 220;
+    const int x = ((int)w - card_w) / 2;
+    const int y = ((int)h - card_h) / 2;
+    fb_fill_rect(x, y, card_w, card_h, 0x00131e2f);
+    fb_fill_rect(x, y, card_w, 1, 0x0089b7ea);
+    fb_fill_rect(x, y + card_h - 1, card_w, 1, 0x00080f18);
+
+    fb_draw_text(x + 20, y + 24, "QuartzOS Boot", 0x00edf6ff, 0x00131e2f);
+    fb_draw_text(x + 20, y + 46, "Initializing desktop services...", 0x00bfd7ee, 0x00131e2f);
+    fb_draw_text(x + 20, y + 76, "Current stage:", 0x00b7cde3, 0x00131e2f);
+    fb_draw_text(x + 130, y + 76, phase ? phase : "working", 0x00e5f2ff, 0x00131e2f);
+
+    if (total == 0) {
+        total = 1;
+    }
+    if (step > total) {
+        step = total;
+    }
+    int bar_x = x + 20;
+    int bar_y = y + 122;
+    int bar_w = card_w - 40;
+    int bar_h = 28;
+    int fill_w = (int)((uint64_t)bar_w * step / total);
+    fb_fill_rect(bar_x, bar_y, bar_w, bar_h, 0x001f2e44);
+    fb_fill_rect(bar_x, bar_y, fill_w, bar_h, 0x003a83cc);
+    fb_fill_rect(bar_x, bar_y, bar_w, 1, 0x0060a6ed);
+    fb_fill_rect(bar_x, bar_y + bar_h - 1, bar_w, 1, 0x000a1622);
+
+    char pct[8];
+    pct[0] = (char)('0' + ((step * 100u / total) / 100u));
+    pct[1] = (char)('0' + (((step * 100u / total) / 10u) % 10u));
+    pct[2] = (char)('0' + ((step * 100u / total) % 10u));
+    pct[3] = '%';
+    pct[4] = '\0';
+    if (pct[0] == '0') {
+        pct[0] = ' ';
+    }
+    if (pct[0] == ' ' && pct[1] == '0') {
+        pct[1] = ' ';
+    }
+    fb_draw_text(bar_x + bar_w - 44, bar_y + 10, pct, 0x00f4fbff, 0x001f2e44);
+
+    fb_draw_text(x + 20, y + 170, "If boot is slow, wait for shell and GUI tasks to finish loading.", 0x009eb9d2, 0x00131e2f);
+    fb_present();
+}
+
 static const boot_profile_t *select_boot_profile(const char *name) {
     if (!name || strcmp(name, "normal") == 0) {
         return &PROFILE_NORMAL;
@@ -278,6 +342,9 @@ static void service_task(void *arg) {
 }
 
 void kernel_main(void) {
+    const uint32_t boot_total_steps = 11;
+    uint32_t boot_step = 0;
+
     serial_init();
     console_init();
     trace_init();
@@ -302,14 +369,17 @@ void kernel_main(void) {
     framebuffer_init(fb->address, (uint32_t)fb->width, (uint32_t)fb->height, (uint32_t)fb->pitch, fb->bpp);
 
     fb_clear(0x00111c26);
+    boot_splash("Bootloader handoff", ++boot_step, boot_total_steps);
     kprintf("QuartzOS kernel booting...\n");
     kprintf("FB: %ux%u pitch=%u bpp=%u\n",
             (unsigned)fb->width, (unsigned)fb->height, (unsigned)fb->pitch, (unsigned)fb->bpp);
 
     gdt_init();
     idt_init();
+    boot_splash("CPU descriptors and interrupts", ++boot_step, boot_total_steps);
     mp_init_work_queue();
     bootstrap_smp();
+    boot_splash("SMP bring-up", ++boot_step, boot_total_steps);
     kprintf("SMP: online=%u total=%u\n", mp_online_cpus(), mp_total_cpus());
 
     pic_init();
@@ -325,15 +395,18 @@ void kernel_main(void) {
     keyboard_init();
     mouse_init((int)fb_width(), (int)fb_height());
     ata_init();
+    boot_splash("Core devices", ++boot_step, boot_total_steps);
 
     pmm_init((struct limine_memmap_response *)memmap_request.response, hhdm_request.response->offset);
     vmm_init(hhdm_request.response->offset);
     heap_init();
+    boot_splash("Memory managers", ++boot_step, boot_total_steps);
     if (!fb_enable_backbuffer()) {
         kprintf("FB: backbuffer disabled\n");
     }
     pci_init();
     e1000_init();
+    boot_splash("PCI + network discovery", ++boot_step, boot_total_steps);
     if (e1000_available()) {
         int nic_irq = e1000_irq_line();
         if (nic_irq >= 0 && nic_irq < 16) {
@@ -349,6 +422,7 @@ void kernel_main(void) {
     if (!sfs_mount(rootfs->address, rootfs->size)) {
         panic("Failed to mount rootfs");
     }
+    boot_splash("Root filesystem mount", ++boot_step, boot_total_steps);
 
     if (ata_present()) {
         if (sfs_attach_block_device(0, 131072)) {
@@ -359,6 +433,7 @@ void kernel_main(void) {
     } else {
         kprintf("SFS: no ATA disk, running from module image\n");
     }
+    boot_splash("Disk persistence", ++boot_step, boot_total_steps);
 
     config_init();
     if (!config_load()) {
@@ -376,6 +451,7 @@ void kernel_main(void) {
         kprintf("CRON: no persisted jobs\n");
     }
     service_init();
+    boot_splash("Runtime config + cron", ++boot_step, boot_total_steps);
 
     tasking_init();
     net_init();
@@ -386,6 +462,7 @@ void kernel_main(void) {
             license_is_active() ? "yes" : "no");
     gui_init();
     shell_init();
+    boot_splash("Shell + desktop services", ++boot_step, boot_total_steps);
 
     if (!service_register("gui", spawn_gui_service, 0, SERVICE_POLICY_ALWAYS)) {
         panic("Failed to register GUI service");
@@ -418,6 +495,7 @@ void kernel_main(void) {
     const boot_profile_t *profile = select_boot_profile(profile_name);
     apply_boot_profile(profile, gui_id, shell_id, net_id);
     kprintf("BOOT: profile=%s\n", profile->name);
+    boot_splash("Scheduling profile", ++boot_step, boot_total_steps);
 
     const char *quantum_cfg = config_get("sched.quantum");
     if (quantum_cfg) {
@@ -444,6 +522,8 @@ void kernel_main(void) {
         panic("Failed to create service task");
     }
     task_set_priority(svc->id, 18);
+    boot_splash("Launching scheduler", ++boot_step, boot_total_steps);
+    boot_splash("Done", boot_total_steps, boot_total_steps);
 
     interrupts_enable();
 

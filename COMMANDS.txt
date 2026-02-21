@@ -78,3 +78,26 @@ ls /assets/gui/icons/system
 ls /assets/gui/wallpapers
 cat /assets/gui/README.md
 cat /assets/gui/manifest.csv
+
+12) New GUI controls (mouse)
+----------------------------
+Top bar:
+- Activities: opens app/start menu
+- Launcher: opens application launcher (runs /bin apps)
+- Features: opens Feature Center (960 toggleable features)
+- Quick: opens quick settings panel
+- Alerts: opens notifications panel
+
+Dock:
+- App icons: focus/minimize windows
+- Bottom orb: opens Launcher
+
+Launcher panel:
+- Tabs: All / Native / Ecosystem
+- Run button: launch app
+- < and >: change page
+
+Feature Center panel:
+- Category list: filter features
+- Enable/Disable/Toggle: applies to current page
+- ON/OFF button in each row: toggle individual feature
