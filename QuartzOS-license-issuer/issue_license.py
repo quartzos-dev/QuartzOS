@@ -21,8 +21,8 @@ DEFAULT_REVOKED = ROOT_DIR / "assets" / "licenses" / "licenses.revoked"
 DEFAULT_META = ROOT_DIR / "assets" / "licenses" / "licenses_meta.csv"
 DEFAULT_AUDIT = ROOT_DIR / "assets" / "licenses" / "licenses_audit.csv"
 DEFAULT_INTEGRITY = ROOT_DIR / "assets" / "licenses" / "licenses_integrity.json"
+DEFAULT_PASSWORD_HASH_OUT = ROOT_DIR / "build" / "issuer_admin_hash.txt"
 
-LEGACY_ADMIN_SALT = "QOS-ISSUER-SALT-V1"
 DEFAULT_ADMIN_PASSWORD = "QuartzOS-Admin-2026!"
 DEFAULT_ADMIN_ITERATIONS = 240_000
 DEFAULT_ADMIN_SALT_HEX = "6f11717bf77eb6fd6808d4df576c02f6"
@@ -36,9 +36,6 @@ DEFAULT_ADMIN_RECORD = (
     f"pbkdf2_sha256${DEFAULT_ADMIN_ITERATIONS}"
     f"${DEFAULT_ADMIN_SALT_HEX}${DEFAULT_ADMIN_HASH_HEX}"
 )
-DEFAULT_LEGACY_ADMIN_HASH = hashlib.sha256(
-    (DEFAULT_ADMIN_PASSWORD + LEGACY_ADMIN_SALT).encode("utf-8")
-).hexdigest()
 
 DEFAULT_HMAC_SECRET_V2 = "QuartzOS-Licensing-HMAC-Key-V2-2026"
 DEFAULT_HMAC_SECRET_V3 = "QuartzOS-Licensing-HMAC-Key-V3-2026"
@@ -481,29 +478,35 @@ def make_password_record(password: str, iterations: int = DEFAULT_ADMIN_ITERATIO
 
 def verify_password(password: str, record: str) -> bool:
     text = record.strip()
-    if text.startswith("pbkdf2_sha256$"):
-        parts = text.split("$")
-        if len(parts) != 4:
-            return False
-        _, iter_text, salt_hex, hash_hex = parts
-        try:
-            iterations = int(iter_text)
-            salt = bytes.fromhex(salt_hex)
-            expected = bytes.fromhex(hash_hex)
-        except ValueError:
-            return False
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-        return hmac.compare_digest(digest, expected)
+    if not text.startswith("pbkdf2_sha256$"):
+        return False
 
-    legacy = hashlib.sha256((password + LEGACY_ADMIN_SALT).encode("utf-8")).hexdigest()
-    return hmac.compare_digest(legacy, text.lower())
+    parts = text.split("$")
+    if len(parts) != 4:
+        return False
+
+    _, iter_text, salt_hex, hash_hex = parts
+    try:
+        iterations = int(iter_text)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(hash_hex)
+    except ValueError:
+        return False
+
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(digest, expected)
 
 
 def verify_admin_password(password: str) -> bool:
     configured = os.getenv("QOS_ISSUER_ADMIN_HASH", DEFAULT_ADMIN_RECORD)
-    if verify_password(password, configured):
-        return True
-    return verify_password(password, DEFAULT_LEGACY_ADMIN_HASH)
+    if not configured.strip().startswith("pbkdf2_sha256$"):
+        print(
+            "error: QOS_ISSUER_ADMIN_HASH must use pbkdf2_sha256 format. "
+            "Generate one with: issue_license.py password-hash",
+            file=sys.stderr,
+        )
+        return False
+    return verify_password(password, configured)
 
 
 def require_password(supplied: str | None) -> None:
@@ -1071,7 +1074,10 @@ def cmd_password_hash(args: argparse.Namespace) -> None:
     if password is None:
         password = getpass.getpass("New issuer password: ")
     record = make_password_record(password, iterations=args.iterations)
-    print(record)
+    out_path = args.out
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(record + "\n", encoding="utf-8")
+    print(f"password hash record written to: {out_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1161,6 +1167,12 @@ def build_parser() -> argparse.ArgumentParser:
     pwhash = sub.add_parser("password-hash", help="generate QOS_ISSUER_ADMIN_HASH value")
     pwhash.add_argument("--password", help="password (optional; prompt if omitted)")
     pwhash.add_argument("--iterations", type=int, default=DEFAULT_ADMIN_ITERATIONS)
+    pwhash.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_PASSWORD_HASH_OUT,
+        help=f"write hash record to file (default: {DEFAULT_PASSWORD_HASH_OUT})",
+    )
     pwhash.set_defaults(func=cmd_password_hash)
 
     return p

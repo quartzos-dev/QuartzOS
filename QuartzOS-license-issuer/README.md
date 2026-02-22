@@ -32,7 +32,9 @@ Password-protected issuer and verifier for `QOS1`, `QOS2`, and `QOS3` keys.
 Set a custom admin hash with env var `QOS_ISSUER_ADMIN_HASH`:
 
 ```bash
-python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py password-hash
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py password-hash \
+  --out /Users/qian/Music/OS/build/issuer_admin_hash.txt
+export QOS_ISSUER_ADMIN_HASH="$(cat /Users/qian/Music/OS/build/issuer_admin_hash.txt)"
 ```
 
 ## Usage
