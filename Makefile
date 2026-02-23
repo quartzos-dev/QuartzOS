@@ -38,6 +38,8 @@ KERNEL_C_SRCS := \
 	kernel/mp.c \
 	kernel/syscall.c \
 	kernel/shell.c \
+	kernel/security.c \
+	kernel/app_runtime.c \
 	kernel/license.c \
 	kernel/secure_store.c \
 	kernel/trace.c \
@@ -76,7 +78,7 @@ KERNEL_C_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(KERNEL_C_SRCS))
 KERNEL_ASM_OBJS := $(patsubst %.asm,$(BUILD_DIR)/%.o,$(KERNEL_ASM_SRCS))
 KERNEL_OBJS := $(KERNEL_C_OBJS) $(KERNEL_ASM_OBJS)
 
-APP_NAMES := greeter banner counter fibonacci primes table spinner pulse progress matrix zigzag checker stairs diamond quotes weekdays stats hexview wave heartbeat
+APP_NAMES := greeter banner counter fibonacci primes table spinner pulse progress matrix zigzag checker stairs diamond quotes weekdays stats hexview wave heartbeat secdiag devbench hashlab nettrace elfinspect
 NATIVE_APP_SRCS := $(foreach name,$(APP_NAMES),apps/named/$(name)/main.c)
 NATIVE_APP_OBJS := $(foreach name,$(APP_NAMES),$(BUILD_DIR)/apps/named/$(name)/main.o)
 APP_RUNTIME_OBJ := $(BUILD_DIR)/apps/named/common/runtime.o
@@ -105,9 +107,13 @@ LICENSE_NOTICE_SRC := assets/licenses/NOTICE.txt
 LICENSE_REVOKED_SRC := assets/licenses/licenses.revoked
 LICENSE_INTEGRITY_SRC := assets/licenses/licenses_integrity.json
 LICENSE_TEXT_SRC := LICENSE
+SECURITY_MANIFEST := $(BUILD_DIR)/autogen/security_manifest.txt
 GUI_ASSET_MANIFEST := assets/gui/manifest.csv
 GUI_ASSETS_DIR := assets/gui
-ROOTFS_EXTRA_MAPS := /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) /etc/licenses.db=$(LICENSE_DB_SRC) /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) /etc/ecosystem_apps.txt=$(ECOSYSTEM_SRC) /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST)
+COMPAT_WRAP_DIR := $(BUILD_DIR)/compat
+COMPAT_WRAPPERS := $(COMPAT_WRAP_DIR)/secdiag_win.exe $(COMPAT_WRAP_DIR)/secdiag_mac.app $(COMPAT_WRAP_DIR)/secdiag_linux.bin
+COMPAT_ROOTFS_MAPS := /bin/secdiag_win.exe=$(COMPAT_WRAP_DIR)/secdiag_win.exe /bin/secdiag_mac.app=$(COMPAT_WRAP_DIR)/secdiag_mac.app /bin/secdiag_linux.bin=$(COMPAT_WRAP_DIR)/secdiag_linux.bin
+ROOTFS_EXTRA_MAPS := /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) /etc/licenses.db=$(LICENSE_DB_SRC) /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) /etc/ecosystem_apps.txt=$(ECOSYSTEM_SRC) /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST) /etc/security_manifest.txt=$(SECURITY_MANIFEST) $(COMPAT_ROOTFS_MAPS)
 ROOTFS_IMG := $(BUILD_DIR)/rootfs.sfs
 DISK_IMAGE := $(BUILD_DIR)/$(OS_NAME)_disk.img
 KERNEL_ELF := $(BUILD_DIR)/kernel.elf
@@ -164,10 +170,34 @@ $(BUILD_DIR)/apps/ecosystem/%.elf: $(BUILD_DIR)/apps/ecosystem/%.o apps/hello/li
 
 apps: $(ECOSYSTEM_MANIFEST) $(APP_ELFS)
 
+$(COMPAT_WRAP_DIR)/secdiag_win.exe: $(BUILD_DIR)/apps/named/secdiag.elf tools/wrap_compat_app.py
+	@mkdir -p $(dir $@)
+	$(PY) tools/wrap_compat_app.py --input-elf $< --platform windows --output $@
+
+$(COMPAT_WRAP_DIR)/secdiag_mac.app: $(BUILD_DIR)/apps/named/secdiag.elf tools/wrap_compat_app.py
+	@mkdir -p $(dir $@)
+	$(PY) tools/wrap_compat_app.py --input-elf $< --platform macos --output $@
+
+$(COMPAT_WRAP_DIR)/secdiag_linux.bin: $(BUILD_DIR)/apps/named/secdiag.elf tools/wrap_compat_app.py
+	@mkdir -p $(dir $@)
+	$(PY) tools/wrap_compat_app.py --input-elf $< --platform linux --output $@
+
+$(SECURITY_MANIFEST): tools/generate_security_manifest.py $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(GUI_ASSET_MANIFEST) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST)
+	@mkdir -p $(dir $@)
+	$(PY) tools/generate_security_manifest.py --output $@ \
+		--add /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) \
+		--add /etc/licenses.db=$(LICENSE_DB_SRC) \
+		--add /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) \
+		--add /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) \
+		--add /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) \
+		--add /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) \
+		--add /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST) \
+		--add /assets/gui/manifest.csv=$(GUI_ASSET_MANIFEST)
+
 gui-assets:
 	$(PY) tools/generate_gui_assets.py
 
-$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
+$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(COMPAT_WRAPPERS) $(SECURITY_MANIFEST) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
 	@mkdir -p $(dir $@)
 	$(PY) tools/mkrootfs.py $@ \
 		$(foreach map,$(ROOTFS_APP_MAPS),--add $(map)) \

@@ -3,6 +3,7 @@
 #include <drivers/mouse.h>
 #include <filesystem/sfs.h>
 #include <gui/gui.h>
+#include <kernel/app_runtime.h>
 #include <kernel/audit.h>
 #include <kernel/console.h>
 #include <kernel/config.h>
@@ -10,6 +11,7 @@
 #include <kernel/license.h>
 #include <kernel/log.h>
 #include <kernel/mp.h>
+#include <kernel/security.h>
 #include <kernel/shell.h>
 #include <kernel/slog.h>
 #include <kernel/service.h>
@@ -24,6 +26,8 @@
 static char cwd[256] = "/";
 static char line[256];
 static size_t line_len;
+static int g_license_lock_mode;
+static int g_security_lock_mode;
 
 static void print_hex_byte(uint8_t value) {
     static const char digits[] = "0123456789abcdef";
@@ -213,6 +217,69 @@ static int apply_profile_runtime(const char *profile_name) {
     return 0;
 }
 
+static void sync_license_lock_mode(void) {
+    int should_lock = license_usage_allowed() ? 0 : 1;
+    if (should_lock == g_license_lock_mode) {
+        return;
+    }
+    g_license_lock_mode = should_lock;
+    if (g_license_lock_mode) {
+        kprintf("license: enforcement lock enabled (consumer monthly license required)\n");
+        audit_log("LICENSE_LOCK_MODE", "enabled");
+    } else {
+        kprintf("license: verification passed, full access enabled\n");
+        audit_log("LICENSE_LOCK_MODE", "disabled");
+    }
+}
+
+static void sync_security_lock_mode(void) {
+    int should_lock = security_lockdown_active() ? 1 : 0;
+    if (should_lock == g_security_lock_mode) {
+        return;
+    }
+    g_security_lock_mode = should_lock;
+    if (g_security_lock_mode) {
+        kprintf("security: lockdown enabled (failsafe active)\n");
+        audit_log("SECURITY_LOCK_MODE", "enabled");
+    } else {
+        kprintf("security: lockdown cleared\n");
+        audit_log("SECURITY_LOCK_MODE", "disabled");
+    }
+}
+
+static int system_access_locked(void) {
+    return g_license_lock_mode || g_security_lock_mode;
+}
+
+static int command_allowed_in_lock_mode(int argc, char **argv) {
+    if (argc <= 0 || !argv || !argv[0]) {
+        return 1;
+    }
+    if (strcmp(argv[0], "help") == 0 || strcmp(argv[0], "clear") == 0) {
+        return 1;
+    }
+    if (strcmp(argv[0], "license") == 0) {
+        if (argc == 1) {
+            return 1;
+        }
+        if (strcmp(argv[1], "status") == 0 ||
+            strcmp(argv[1], "terms") == 0 ||
+            strcmp(argv[1], "accept") == 0 ||
+            strcmp(argv[1], "reject") == 0 ||
+            strcmp(argv[1], "verify") == 0 ||
+            strcmp(argv[1], "activate") == 0 ||
+            strcmp(argv[1], "deactivate") == 0 ||
+            strcmp(argv[1], "reload") == 0 ||
+            strcmp(argv[1], "unlock") == 0) {
+            return 1;
+        }
+    }
+    if (strcmp(argv[0], "security") == 0) {
+        return 1;
+    }
+    return 0;
+}
+
 static int parse_ipv4(const char *text, uint32_t *out_ip) {
     if (!text || !out_ip) {
         return 0;
@@ -256,47 +323,184 @@ static void print_prompt(void) {
     kprintf("\n%s$ ", cwd);
 }
 
-static void path_join(const char *input, char *out, size_t out_len) {
+static int path_resolve(const char *input, char *out, size_t out_len) {
+    if (!out || out_len < 2) {
+        return 0;
+    }
+
+    char raw[256];
     if (!input || !*input) {
-        strncpy(out, cwd, out_len - 1);
-        out[out_len - 1] = '\0';
-        return;
-    }
-
-    if (input[0] == '/') {
-        strncpy(out, input, out_len - 1);
-        out[out_len - 1] = '\0';
+        strncpy(raw, cwd, sizeof(raw) - 1);
+        raw[sizeof(raw) - 1] = '\0';
+    } else if (input[0] == '/') {
+        strncpy(raw, input, sizeof(raw) - 1);
+        raw[sizeof(raw) - 1] = '\0';
     } else {
-        out[0] = '\0';
-        strncpy(out, cwd, out_len - 1);
-        out[out_len - 1] = '\0';
-        if (strcmp(out, "/") != 0) {
-            strncat(out, "/", out_len - strlen(out) - 1);
+        raw[0] = '\0';
+        strncpy(raw, cwd, sizeof(raw) - 1);
+        raw[sizeof(raw) - 1] = '\0';
+        if (strcmp(raw, "/") != 0) {
+            strncat(raw, "/", sizeof(raw) - strlen(raw) - 1);
         }
-        strncat(out, input, out_len - strlen(out) - 1);
+        strncat(raw, input, sizeof(raw) - strlen(raw) - 1);
     }
 
-    size_t len = strlen(out);
-    while (len > 1 && out[len - 1] == '/') {
-        out[len - 1] = '\0';
-        len--;
+    if (raw[0] != '/') {
+        return 0;
     }
+
+    char norm[256];
+    size_t nlen = 1;
+    norm[0] = '/';
+    norm[1] = '\0';
+
+    const char *p = raw;
+    while (*p == '/') {
+        p++;
+    }
+
+    while (*p) {
+        char comp[96];
+        size_t clen = 0;
+        while (*p && *p != '/') {
+            unsigned char ch = (unsigned char)*p;
+            if (ch < 32u || ch == 127u) {
+                return 0;
+            }
+            if (clen + 1 >= sizeof(comp)) {
+                return 0;
+            }
+            comp[clen++] = *p++;
+        }
+        comp[clen] = '\0';
+
+        while (*p == '/') {
+            p++;
+        }
+
+        if (clen == 0 || strcmp(comp, ".") == 0) {
+            continue;
+        }
+
+        if (strcmp(comp, "..") == 0) {
+            if (nlen > 1) {
+                while (nlen > 1 && norm[nlen - 1] == '/') {
+                    nlen--;
+                }
+                while (nlen > 1 && norm[nlen - 1] != '/') {
+                    nlen--;
+                }
+                if (nlen > 1) {
+                    nlen--;
+                }
+                norm[nlen] = '\0';
+            }
+            continue;
+        }
+
+        if (strchr(comp, '\\')) {
+            return 0;
+        }
+
+        if (nlen > 1) {
+            if (nlen + 1 >= sizeof(norm)) {
+                return 0;
+            }
+            norm[nlen++] = '/';
+        }
+        if (nlen + clen >= sizeof(norm)) {
+            return 0;
+        }
+        memcpy(norm + nlen, comp, clen);
+        nlen += clen;
+        norm[nlen] = '\0';
+    }
+
+    strncpy(out, norm, out_len - 1);
+    out[out_len - 1] = '\0';
+    return 1;
 }
 
-static void cwd_up(void) {
-    if (strcmp(cwd, "/") == 0) {
-        return;
+static int path_has_prefix(const char *path, const char *prefix) {
+    if (!path || !prefix) {
+        return 0;
     }
-    size_t len = strlen(cwd);
-    while (len > 1 && cwd[len - 1] == '/') {
-        cwd[--len] = '\0';
+    size_t plen = strlen(prefix);
+    if (plen == 0) {
+        return 0;
     }
-    while (len > 1 && cwd[len - 1] != '/') {
-        cwd[--len] = '\0';
+    if (strncmp(path, prefix, plen) != 0) {
+        return 0;
     }
-    if (len > 1) {
-        cwd[len - 1] = '\0';
+    return path[plen] == '\0' || path[plen] == '/';
+}
+
+static int path_equals(const char *a, const char *b) {
+    return a && b && strcmp(a, b) == 0;
+}
+
+static int path_is_security_protected(const char *path) {
+    if (!path || path[0] != '/') {
+        return 0;
     }
+
+    if (path_has_prefix(path, "/bin") || path_has_prefix(path, "/boot")) {
+        return 1;
+    }
+
+    if (path_has_prefix(path, "/etc/licenses")) {
+        return 1;
+    }
+
+    if (path_equals(path, "/etc/licenses.db") ||
+        path_equals(path, "/etc/licenses.revoked") ||
+        path_equals(path, "/etc/license.state") ||
+        path_equals(path, "/etc/license.accept") ||
+        path_equals(path, "/etc/licenses_integrity.json") ||
+        path_equals(path, "/etc/licenses_audit.csv") ||
+        path_equals(path, "/etc/licenses_meta.csv") ||
+        path_equals(path, "/etc/system.cfg") ||
+        path_equals(path, "/etc/security.cfg") ||
+        path_equals(path, "/etc/security_manifest.txt") ||
+        path_equals(path, "/etc/cron.cfg") ||
+        path_equals(path, "/etc/LICENSE.txt") ||
+        path_equals(path, "/etc/license_notice.txt")) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int path_is_sensitive_read(const char *path) {
+    if (!path || path[0] != '/') {
+        return 0;
+    }
+    if (path_has_prefix(path, "/etc/licenses")) {
+        return 1;
+    }
+    return path_equals(path, "/etc/license.state") ||
+           path_equals(path, "/etc/license.accept") ||
+           path_equals(path, "/etc/licenses.db") ||
+           path_equals(path, "/etc/licenses.revoked") ||
+           path_equals(path, "/etc/security.cfg") ||
+           path_equals(path, "/etc/security_manifest.txt");
+}
+
+static int command_is_privileged(const char *cmd) {
+    if (!cmd) {
+        return 0;
+    }
+    return strcmp(cmd, "sched") == 0 ||
+           strcmp(cmd, "svc") == 0 ||
+           strcmp(cmd, "cron") == 0 ||
+           strcmp(cmd, "config") == 0 ||
+           strcmp(cmd, "license") == 0 ||
+           strcmp(cmd, "trace") == 0 ||
+           strcmp(cmd, "audit") == 0 ||
+           strcmp(cmd, "log") == 0 ||
+           strcmp(cmd, "boot") == 0 ||
+           strcmp(cmd, "security") == 0 ||
+           strcmp(cmd, "diskread") == 0;
 }
 
 static int tokenize(char *input, char **argv, int max) {
@@ -321,7 +525,81 @@ static int tokenize(char *input, char **argv, int max) {
     return argc;
 }
 
+static int resolve_bin_app_path(const char *input, char *out, size_t out_len) {
+    if (!input || !*input || !out || out_len < 2) {
+        return 0;
+    }
+
+    if (!strchr(input, '/')) {
+        char raw[256];
+        raw[0] = '\0';
+        strncat(raw, "/bin/", sizeof(raw) - strlen(raw) - 1);
+        strncat(raw, input, sizeof(raw) - strlen(raw) - 1);
+        if (!path_resolve(raw, out, out_len)) {
+            return 0;
+        }
+    } else {
+        if (!path_resolve(input, out, out_len)) {
+            return 0;
+        }
+    }
+
+    if (!path_has_prefix(out, "/bin")) {
+        return 0;
+    }
+    return 1;
+}
+
+static int load_app_image(const char *path, void **out_image, size_t *out_size) {
+    if (!path || !out_image || !out_size) {
+        return 0;
+    }
+    *out_image = 0;
+    *out_size = 0;
+
+    size_t cap = 4 * 1024 * 1024;
+    void *image = kmalloc(cap);
+    if (!image) {
+        return 0;
+    }
+    size_t read = 0;
+    if (!sfs_read_file(path, image, cap, &read)) {
+        kfree(image);
+        return 0;
+    }
+
+    *out_image = image;
+    *out_size = read;
+    return 1;
+}
+
 static void cmd_help(void) {
+    if (system_access_locked()) {
+        if (g_license_lock_mode) {
+            kprintf("System is in LICENSE LOCK mode.\n");
+            kprintf("Minimum required: verified QOS3 consumer monthly license.\n");
+        }
+        if (g_security_lock_mode) {
+            kprintf("System is in SECURITY LOCKDOWN mode.\n");
+            kprintf("Trigger: integrity/intrusion failsafe.\n");
+        }
+        kprintf("Allowed commands:\n");
+        kprintf("  help               Show this message\n");
+        kprintf("  clear              Clear console\n");
+        kprintf("  license status     Show license state\n");
+        kprintf("  license terms      View terms\n");
+        kprintf("  license accept     Accept terms\n");
+        kprintf("  license reject     Reject terms\n");
+        kprintf("  license verify <key>    Validate key signature/state\n");
+        kprintf("  license activate <key>  Activate key\n");
+        kprintf("  license reload     Reload key databases\n");
+        kprintf("  license unlock     Unlock GUI/network after verification\n");
+        kprintf("  security status    Show security posture\n");
+        kprintf("  security verify    Re-run integrity checks\n");
+        kprintf("  security failsafe ...  Inspect/reset failsafes\n");
+        return;
+    }
+
     kprintf("Commands:\n");
     kprintf("  help               Show help\n");
     kprintf("  ls [path]          List directory\n");
@@ -330,7 +608,8 @@ static void cmd_help(void) {
     kprintf("  write <f> <text>   Write text file\n");
     kprintf("  mkdir <path>       Create directory\n");
     kprintf("  apps [find <txt>]  List installed apps\n");
-    kprintf("  run <elf>          Run ELF app\n");
+    kprintf("  run <name|/bin/x>  Run custom/Linux/Windows/macOS app payload from /bin\n");
+    kprintf("  compat ...         Probe and run compatibility wrappers\n");
     kprintf("  sync               Flush filesystem to disk\n");
     kprintf("  cpuinfo            Show SMP status\n");
     kprintf("  ps                 Show scheduler task table\n");
@@ -350,6 +629,7 @@ static void cmd_help(void) {
     kprintf("  svc ...            Service manager controls\n");
     kprintf("  cron ...           Cron scheduler controls\n");
     kprintf("  config ...         Configuration database tools\n");
+    kprintf("  security ...       Security policy, features, and failsafes\n");
     kprintf("  boot ...           Boot profile controls\n");
     kprintf("  mutex stats        Mutex contention statistics\n");
     kprintf("  mouse ...          Mouse settings/status\n");
@@ -361,6 +641,26 @@ static void execute_line(char *input) {
     int argc = tokenize(input, argv, 16);
     if (argc == 0) {
         return;
+    }
+
+    sync_license_lock_mode();
+    sync_security_lock_mode();
+    if (system_access_locked() && !command_allowed_in_lock_mode(argc, argv)) {
+        if (g_license_lock_mode) {
+            audit_log("CMD_BLOCKED", "license-lock");
+            security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "license-lock");
+            kprintf("system locked: command blocked until verified consumer monthly license is active.\n");
+            kprintf("use: license status | license terms | license accept | license activate <key> | license unlock\n");
+        } else {
+            audit_log("CMD_BLOCKED", "security-lock");
+            security_note_event(SECURITY_EVENT_CMD_BLOCKED, "security-lock");
+            kprintf("security lockdown: command blocked while failsafe is active.\n");
+            kprintf("use: security status | security verify | security failsafe reset all\n");
+        }
+        return;
+    }
+    if (command_is_privileged(argv[0])) {
+        audit_log("CMD_PRIVILEGED", argv[0]);
     }
 
     if (strcmp(argv[0], "help") == 0) {
@@ -423,11 +723,187 @@ static void execute_line(char *input) {
         return;
     }
 
+    if (strcmp(argv[0], "security") == 0) {
+        if (argc == 1 || strcmp(argv[1], "status") == 0) {
+            kprintf("security: mode=%s lockdown=%s intrusion=%s integrity=%s features=%u/%u threshold=%u events=%u checked=%u failures=%u\n",
+                    security_mode_name(security_mode()),
+                    security_lockdown_active() ? "on" : "off",
+                    security_intrusion_failsafe_active() ? "on" : "off",
+                    security_integrity_failsafe_active() ? "on" : "off",
+                    (unsigned)security_feature_enabled_count(),
+                    (unsigned)security_feature_count(),
+                    (unsigned)security_intrusion_threshold(),
+                    (unsigned)security_recent_suspicious_events(),
+                    (unsigned)security_integrity_checked_entries(),
+                    (unsigned)security_integrity_failure_count());
+            return;
+        }
+
+        if (strcmp(argv[1], "verify") == 0) {
+            char report[160];
+            if (security_verify_integrity_now(report, sizeof(report))) {
+                kprintf("security: integrity ok (%s)\n", report);
+            } else {
+                kprintf("security: integrity failure (%s)\n", report);
+            }
+            sync_security_lock_mode();
+            return;
+        }
+
+        if (strcmp(argv[1], "features") == 0) {
+            uint32_t page = 1;
+            if (argc >= 3 && !parse_u32_text(argv[2], &page)) {
+                kprintf("security: usage security features [page]\n");
+                return;
+            }
+            if (page == 0) {
+                page = 1;
+            }
+            uint32_t per_page = 20;
+            uint32_t total = (uint32_t)security_feature_count();
+            uint32_t pages = (total + per_page - 1u) / per_page;
+            if (page > pages) {
+                page = pages;
+            }
+            uint32_t start = (page - 1u) * per_page;
+            uint32_t end = start + per_page;
+            if (end > total) {
+                end = total;
+            }
+            kprintf("security features page %u/%u:\n", (unsigned)page, (unsigned)pages);
+            for (uint32_t i = start; i < end; i++) {
+                char name[96];
+                security_feature_name(i, name, sizeof(name));
+                kprintf("  %u [%s] %s\n",
+                        (unsigned)i,
+                        security_feature_enabled(i) ? "on " : "off",
+                        name);
+            }
+            return;
+        }
+
+        if (argc >= 4 && strcmp(argv[1], "feature") == 0) {
+            uint32_t index = 0;
+            int on = 0;
+            if (!parse_u32_text(argv[2], &index) || !parse_on_off(argv[3], &on)) {
+                kprintf("security: usage security feature <id> <on|off>\n");
+                return;
+            }
+            if (!security_feature_set(index, on != 0)) {
+                kprintf("security: invalid feature id\n");
+                return;
+            }
+            kprintf("security: feature %u=%s\n", (unsigned)index, on ? "on" : "off");
+            return;
+        }
+
+        if (argc >= 3 && strcmp(argv[1], "mode") == 0) {
+            security_mode_t mode = SECURITY_MODE_HARDENED;
+            if (strcmp(argv[2], "normal") == 0) {
+                mode = SECURITY_MODE_NORMAL;
+            } else if (strcmp(argv[2], "hardened") == 0) {
+                mode = SECURITY_MODE_HARDENED;
+            } else if (strcmp(argv[2], "lockdown") == 0) {
+                mode = SECURITY_MODE_LOCKDOWN;
+            } else {
+                kprintf("security: usage security mode <normal|hardened|lockdown>\n");
+                return;
+            }
+            if (!security_set_mode(mode)) {
+                kprintf("security: mode update failed\n");
+                return;
+            }
+            sync_security_lock_mode();
+            kprintf("security: mode=%s\n", security_mode_name(security_mode()));
+            return;
+        }
+
+        if (strcmp(argv[1], "failsafe") == 0) {
+            if (argc == 2 || strcmp(argv[2], "status") == 0) {
+                kprintf("security failsafe: intrusion=%s integrity=%s lockdown=%s\n",
+                        security_intrusion_failsafe_active() ? "on" : "off",
+                        security_integrity_failsafe_active() ? "on" : "off",
+                        security_lockdown_active() ? "on" : "off");
+                return;
+            }
+            if (argc >= 4 && strcmp(argv[2], "reset") == 0) {
+                if (!security_feature_enabled(SECURITY_FEATURE_ALLOW_FAILSAFE_RESET)) {
+                    kprintf("security: failsafe reset disabled by policy\n");
+                    return;
+                }
+                if (!license_usage_allowed()) {
+                    kprintf("security: reset requires active verified license\n");
+                    return;
+                }
+                if (strcmp(argv[3], "intrusion") == 0) {
+                    security_reset_failsafes(true, false);
+                } else if (strcmp(argv[3], "integrity") == 0) {
+                    security_reset_failsafes(false, true);
+                } else if (strcmp(argv[3], "all") == 0) {
+                    security_reset_failsafes(true, true);
+                } else {
+                    kprintf("security: usage security failsafe reset <intrusion|integrity|all>\n");
+                    return;
+                }
+                sync_security_lock_mode();
+                kprintf("security: failsafe reset applied\n");
+                return;
+            }
+            kprintf("security failsafe commands:\n");
+            kprintf("  security failsafe status\n");
+            kprintf("  security failsafe reset <intrusion|integrity|all>\n");
+            return;
+        }
+
+        if (argc >= 3 && strcmp(argv[1], "threshold") == 0) {
+            uint32_t value = 0;
+            if (!parse_u32_text(argv[2], &value) || !security_set_intrusion_threshold(value)) {
+                kprintf("security: usage security threshold <1..10000>\n");
+                return;
+            }
+            kprintf("security: intrusion threshold=%u\n", (unsigned)security_intrusion_threshold());
+            return;
+        }
+
+        if (strcmp(argv[1], "save") == 0) {
+            if (!security_save()) {
+                kprintf("security: save failed\n");
+                return;
+            }
+            kprintf("security: saved\n");
+            return;
+        }
+
+        if (strcmp(argv[1], "load") == 0) {
+            if (!security_load()) {
+                kprintf("security: load failed or no policy file\n");
+                return;
+            }
+            sync_security_lock_mode();
+            kprintf("security: loaded\n");
+            return;
+        }
+
+        kprintf("security commands:\n");
+        kprintf("  security status\n");
+        kprintf("  security verify\n");
+        kprintf("  security features [page]\n");
+        kprintf("  security feature <id> <on|off>\n");
+        kprintf("  security mode <normal|hardened|lockdown>\n");
+        kprintf("  security threshold <1..10000>\n");
+        kprintf("  security failsafe status\n");
+        kprintf("  security failsafe reset <intrusion|integrity|all>\n");
+        kprintf("  security save\n");
+        kprintf("  security load\n");
+        return;
+    }
+
     if (strcmp(argv[0], "license") == 0) {
         if (argc == 1 || strcmp(argv[1], "status") == 0) {
             char active[LICENSE_MAX_KEY_TEXT + 1];
             char terms_hash[65];
             int active_now = license_is_active() ? 1 : 0;
+            int usage_ok = license_usage_allowed() ? 1 : 0;
             uint8_t policy = license_active_policy_bits();
             const char *tier = license_active_tier_name();
             license_active_key(active, sizeof(active));
@@ -436,8 +912,9 @@ static void execute_line(char *input) {
                 strncpy(terms_hash, "none", sizeof(terms_hash) - 1);
                 terms_hash[sizeof(terms_hash) - 1] = '\0';
             }
-            kprintf("license: active=%s key=%s tier=%s policy=0x%x terms=%s hash=%s issued=%u revoked=%u failed=%u lock=%us last=%s\n",
+            kprintf("license: active=%s usage=%s key=%s tier=%s policy=0x%x terms=%s hash=%s issued=%u revoked=%u failed=%u lock=%us last=%s\n",
                     active_now ? "yes" : "no",
+                    usage_ok ? "allowed" : "blocked",
                     active,
                     (active_now && tier) ? tier : "none",
                     (unsigned)policy,
@@ -528,6 +1005,29 @@ static void execute_line(char *input) {
             return;
         }
 
+        if (strcmp(argv[1], "unlock") == 0) {
+            if (!license_usage_allowed()) {
+                kprintf("license: unlock denied. requires verified consumer monthly license and accepted terms.\n");
+                return;
+            }
+            if (security_lockdown_active()) {
+                kprintf("license: unlock denied. security lockdown active; clear failsafe first.\n");
+                return;
+            }
+            const char *profile = config_get("boot.profile");
+            if (!profile) {
+                profile = "normal";
+            }
+            if (!apply_profile_runtime(profile)) {
+                kprintf("license: unlock failed to start desktop services\n");
+                return;
+            }
+            g_license_lock_mode = 0;
+            sync_security_lock_mode();
+            kprintf("license: system unlocked (profile=%s)\n", profile);
+            return;
+        }
+
         kprintf("license commands:\n");
         kprintf("  license status\n");
         kprintf("  license terms\n");
@@ -537,6 +1037,7 @@ static void execute_line(char *input) {
         kprintf("  license activate <key>\n");
         kprintf("  license deactivate\n");
         kprintf("  license reload\n");
+        kprintf("  license unlock\n");
         return;
     }
 
@@ -1127,7 +1628,10 @@ static void execute_line(char *input) {
 
     if (strcmp(argv[0], "ls") == 0) {
         char path[256];
-        path_join(argc > 1 ? argv[1] : cwd, path, sizeof(path));
+        if (!path_resolve(argc > 1 ? argv[1] : cwd, path, sizeof(path))) {
+            kprintf("ls: invalid path\n");
+            return;
+        }
         char out[2048];
         int n = sfs_list(path, out, sizeof(out));
         if (n < 0) {
@@ -1143,13 +1647,12 @@ static void execute_line(char *input) {
             kprintf("cd: missing operand\n");
             return;
         }
-        if (strcmp(argv[1], "..") == 0) {
-            cwd_up();
-            return;
-        }
 
         char path[256];
-        path_join(argv[1], path, sizeof(path));
+        if (!path_resolve(argv[1], path, sizeof(path))) {
+            kprintf("cd: invalid path\n");
+            return;
+        }
 
         char out[2];
         if (sfs_list(path, out, sizeof(out)) < 0) {
@@ -1166,8 +1669,22 @@ static void execute_line(char *input) {
             kprintf("mkdir: missing operand\n");
             return;
         }
+        if (security_lockdown_active()) {
+            security_note_event(SECURITY_EVENT_FS_BLOCKED, "mkdir-lockdown");
+            kprintf("mkdir: blocked in security lockdown\n");
+            return;
+        }
         char path[256];
-        path_join(argv[1], path, sizeof(path));
+        if (!path_resolve(argv[1], path, sizeof(path))) {
+            kprintf("mkdir: invalid path\n");
+            return;
+        }
+        if (path_has_prefix(path, "/etc") || path_has_prefix(path, "/bin") || path_has_prefix(path, "/boot")) {
+            audit_log("SECURITY_BLOCK_MKDIR", path);
+            security_note_event(SECURITY_EVENT_FS_BLOCKED, path);
+            kprintf("mkdir: denied on protected path %s\n", path);
+            return;
+        }
         if (!sfs_make_dir(path)) {
             kprintf("mkdir: failed: %s\n", path);
             return;
@@ -1234,7 +1751,16 @@ static void execute_line(char *input) {
             return;
         }
         char path[256];
-        path_join(argv[1], path, sizeof(path));
+        if (!path_resolve(argv[1], path, sizeof(path))) {
+            kprintf("cat: invalid path\n");
+            return;
+        }
+        if (path_is_sensitive_read(path)) {
+            audit_log("SECURITY_BLOCK_READ", path);
+            security_note_event(SECURITY_EVENT_FS_BLOCKED, path);
+            kprintf("cat: denied on sensitive path %s\n", path);
+            return;
+        }
         size_t cap = 64 * 1024;
         char *buf = (char *)kmalloc(cap + 1);
         if (!buf) {
@@ -1258,9 +1784,23 @@ static void execute_line(char *input) {
             kprintf("write: usage write <path> <text>\n");
             return;
         }
+        if (security_lockdown_active()) {
+            security_note_event(SECURITY_EVENT_FS_BLOCKED, "write-lockdown");
+            kprintf("write: blocked in security lockdown\n");
+            return;
+        }
 
         char path[256];
-        path_join(argv[1], path, sizeof(path));
+        if (!path_resolve(argv[1], path, sizeof(path))) {
+            kprintf("write: invalid path\n");
+            return;
+        }
+        if (path_is_security_protected(path)) {
+            audit_log("SECURITY_BLOCK_WRITE", path);
+            security_note_event(SECURITY_EVENT_FS_BLOCKED, path);
+            kprintf("write: denied on protected path %s\n", path);
+            return;
+        }
 
         char payload[512];
         payload[0] = '\0';
@@ -1301,6 +1841,10 @@ static void execute_line(char *input) {
     }
 
     if (strcmp(argv[0], "netinfo") == 0 || strcmp(argv[0], "ifconfig") == 0) {
+        if (!security_allow_network_ops()) {
+            kprintf("net: blocked by security policy\n");
+            return;
+        }
         if (!net_available()) {
             kprintf("net: unavailable\n");
             return;
@@ -1324,6 +1868,10 @@ static void execute_line(char *input) {
     }
 
     if (strcmp(argv[0], "ping") == 0) {
+        if (!security_allow_network_ops()) {
+            kprintf("ping: blocked by security policy\n");
+            return;
+        }
         if (argc < 2) {
             kprintf("ping: usage ping <ip>\n");
             return;
@@ -1342,6 +1890,10 @@ static void execute_line(char *input) {
     }
 
     if (strcmp(argv[0], "tcplisten") == 0) {
+        if (!security_allow_network_ops()) {
+            kprintf("tcplisten: blocked by security policy\n");
+            return;
+        }
         if (argc < 2) {
             kprintf("tcplisten: usage tcplisten <port>\n");
             return;
@@ -1364,6 +1916,10 @@ static void execute_line(char *input) {
     }
 
     if (strcmp(argv[0], "tcpsend") == 0) {
+        if (!security_allow_network_ops()) {
+            kprintf("tcpsend: blocked by security policy\n");
+            return;
+        }
         if (argc < 4) {
             kprintf("tcpsend: usage tcpsend <ip> <port> <text>\n");
             return;
@@ -1403,45 +1959,103 @@ static void execute_line(char *input) {
         return;
     }
 
+    if (strcmp(argv[0], "compat") == 0) {
+        if (argc < 3) {
+            kprintf("compat commands:\n");
+            kprintf("  compat probe <name|/bin/x>\n");
+            kprintf("  compat run <name|/bin/x>\n");
+            return;
+        }
+
+        char path[256];
+        if (!resolve_bin_app_path(argv[2], path, sizeof(path))) {
+            security_note_event(SECURITY_EVENT_APP_BLOCKED, "compat-path");
+            kprintf("compat: invalid app path (must be under /bin)\n");
+            return;
+        }
+
+        void *image = 0;
+        size_t image_len = 0;
+        if (!load_app_image(path, &image, &image_len)) {
+            kprintf("compat: cannot open %s\n", path);
+            return;
+        }
+
+        if (strcmp(argv[1], "probe") == 0) {
+            app_runtime_info_t info;
+            if (!app_runtime_probe(image, image_len, &info)) {
+                kprintf("compat: format=unknown runnable=no detail=unrecognized\n");
+            } else {
+                kprintf("compat: format=%s wrapped=%s runnable=%s detail=%s\n",
+                        app_runtime_kind_name(info.kind),
+                        info.wrapped ? "yes" : "no",
+                        info.runnable ? "yes" : "no",
+                        info.detail);
+            }
+            kfree(image);
+            return;
+        }
+
+        if (strcmp(argv[1], "run") == 0) {
+            if (!license_usage_allowed()) {
+                audit_log("RUN_BLOCKED", "license-not-authorized");
+                security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "run-license");
+                kprintf("compat: blocked. requires verified consumer monthly license and accepted terms.\n");
+                kfree(image);
+                return;
+            }
+            app_runtime_info_t info;
+            if (!app_runtime_run(image, image_len, &info)) {
+                kprintf("compat: failed format=%s detail=%s\n",
+                        app_runtime_kind_name(info.kind),
+                        info.detail[0] ? info.detail : "runtime failure");
+                kfree(image);
+                return;
+            }
+            kprintf("compat: process finished %s (%s)\n", path, app_runtime_kind_name(info.kind));
+            kfree(image);
+            return;
+        }
+
+        kprintf("compat: unknown command\n");
+        kprintf("compat commands: probe, run\n");
+        kfree(image);
+        return;
+    }
+
     if (strcmp(argv[0], "run") == 0) {
         if (argc < 2) {
             kprintf("run: missing operand\n");
             return;
         }
-        if (!license_terms_available()) {
-            audit_log("RUN_BLOCKED", "license-terms-missing");
-            kprintf("run: terms file missing. restore /etc/LICENSE.txt\n");
-            return;
-        }
-        if (!license_terms_accepted()) {
-            audit_log("RUN_BLOCKED", "license-terms-pending");
-            kprintf("run: terms not accepted. run 'license terms' then 'license accept'\n");
-            return;
-        }
-        if (!license_is_active()) {
-            audit_log("RUN_BLOCKED", "license-inactive");
-            kprintf("run: license inactive. use 'license activate <key>'\n");
+        if (!license_usage_allowed()) {
+            audit_log("RUN_BLOCKED", "license-not-authorized");
+            security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "run-license");
+            kprintf("run: blocked. requires verified consumer monthly license and accepted terms.\n");
             return;
         }
         char path[256];
-        path_join(argv[1], path, sizeof(path));
+        if (!resolve_bin_app_path(argv[1], path, sizeof(path))) {
+            security_note_event(SECURITY_EVENT_APP_BLOCKED, "run-path");
+            audit_log("SECURITY_BLOCK_EXEC", argv[1]);
+            kprintf("run: denied. executable path must be under /bin\n");
+            return;
+        }
 
-        size_t cap = 2 * 1024 * 1024;
-        void *image = kmalloc(cap);
-        if (!image) {
-            kprintf("run: out of memory\n");
-            return;
-        }
-        size_t read = 0;
-        if (!sfs_read_file(path, image, cap, &read)) {
+        void *image = 0;
+        size_t image_len = 0;
+        if (!load_app_image(path, &image, &image_len)) {
             kprintf("run: cannot open %s\n", path);
-            kfree(image);
             return;
         }
-        if (!user_run_elf(image, read)) {
-            kprintf("run: failed to start %s\n", path);
+
+        app_runtime_info_t info;
+        if (!app_runtime_run(image, image_len, &info)) {
+            kprintf("run: failed to start %s (%s)\n",
+                    path,
+                    info.detail[0] ? info.detail : app_runtime_kind_name(info.kind));
         } else {
-            kprintf("run: process finished %s\n", path);
+            kprintf("run: process finished %s (%s)\n", path, app_runtime_kind_name(info.kind));
         }
         kfree(image);
         return;
@@ -1467,7 +2081,19 @@ static void execute_line(char *input) {
 void shell_init(void) {
     line_len = 0;
     line[0] = '\0';
-    kprintf("QuartzOS shell ready. type 'help'.\n");
+    g_license_lock_mode = license_usage_allowed() ? 0 : 1;
+    g_security_lock_mode = security_lockdown_active() ? 1 : 0;
+    if (g_license_lock_mode || g_security_lock_mode) {
+        if (g_license_lock_mode) {
+            kprintf("QuartzOS shell ready (LICENSE LOCK mode).\n");
+        }
+        if (g_security_lock_mode) {
+            kprintf("QuartzOS shell ready (SECURITY LOCKDOWN mode).\n");
+        }
+        kprintf("Type 'help' for unlock instructions.\n");
+    } else {
+        kprintf("QuartzOS shell ready. type 'help'.\n");
+    }
     print_prompt();
 }
 

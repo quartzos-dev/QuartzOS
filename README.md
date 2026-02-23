@@ -120,7 +120,9 @@ Commands:
 - `write <file> <text>`
 - `mkdir <path>`
 - `apps [find <text>]`
-- `run <elf>`
+- `run <name|/bin/x>`
+- `compat probe <name|/bin/x>`
+- `compat run <name|/bin/x>`
 - `sync`
 - `cpuinfo`
 - `netinfo`
@@ -138,6 +140,15 @@ Commands:
 - `license activate <key>`
 - `license deactivate`
 - `license reload`
+- `security status`
+- `security verify`
+- `security features [page]`
+- `security feature <id> <on|off>`
+- `security mode <normal|hardened|lockdown>`
+- `security failsafe status`
+- `security failsafe reset <intrusion|integrity|all>`
+- `security save`
+- `security load`
 - `mouse status`
 - `mouse invertx <on|off>`
 - `mouse inverty <on|off>`
@@ -158,15 +169,21 @@ Features:
 ### Application system
 - ELF64 loader (`process/user.c`).
 - User apps launched by shell (`run /bin/<name>`).
-- 20 named demo apps in `/bin`:
+- 25 named demo/dev apps in `/bin`:
   `greeter`, `banner`, `counter`, `fibonacci`, `primes`,
   `table`, `spinner`, `pulse`, `progress`, `matrix`,
   `zigzag`, `checker`, `stairs`, `diamond`, `quotes`,
-  `weekdays`, `stats`, `hexview`, `wave`, `heartbeat`
+  `weekdays`, `stats`, `hexview`, `wave`, `heartbeat`,
+  `secdiag`, `devbench`, `hashlab`, `nettrace`, `elfinspect`
 - 500 generated ecosystem apps from:
   `assets/ecosystem/QuartzOS_Ecosystem_Apps_No_Monetization.txt`
   - App binary naming: `eco001_*` ... `eco500_*`
   - Browse with `apps` or filter with `apps find <text>`
+- Compatibility runtime (`kernel/app_runtime.c`) supports:
+  - native/custom Quartz ELF
+  - Linux static ELF (`ET_EXEC`, no interpreter)
+  - Windows/macOS compatibility wrappers carrying embedded Quartz ELF payloads
+  - shipped wrapper examples: `/bin/secdiag_win.exe`, `/bin/secdiag_mac.app`, `/bin/secdiag_linux.bin`
 - Syscalls via `int 0x80`:
   - `SYS_WRITE`
   - `SYS_EXIT`
@@ -177,6 +194,10 @@ Features:
 - Syscall entry point (`int 0x80`) controlled by kernel.
 - Kernel pages are supervisor mappings; user mappings marked with `VMM_USER`.
 - User stack is explicitly mapped in user virtual space.
+- User syscall pointers are validated against mapped `VMM_USER` pages before kernel reads.
+- `SYS_WRITE` is length-capped and copied into a kernel buffer to reduce abuse surface.
+- ELF loader now enforces stricter x86_64 ELF header checks and program-header bounds.
+- User page permissions are finalized post-load with W^X-style protection (`write => NX`).
 - Kernel-side signed license verification with triple-format support:
   `QOS1` (legacy), `QOS2` (HMAC-SHA256/64), and `QOS3` (HMAC-SHA256/96).
 - Runtime activation is restricted to modern `QOS3` keys.
@@ -186,8 +207,23 @@ Features:
 - Terms file hashing and binding (`/etc/LICENSE.txt`) so acceptance resets on terms changes.
 - Authenticated encryption (`QENC1`) for critical persisted security files:
   `/etc/licenses.db`, `/etc/licenses.revoked`, `/etc/license.state`,
-  `/etc/system.cfg`, `/etc/cron.cfg`.
+  `/etc/system.cfg`, `/etc/cron.cfg`, `/etc/security.cfg`.
 - Activation abuse protection with failed-attempt windowing + lockout.
+- Kernel security policy engine with **200 runtime feature toggles**:
+  - persisted encrypted policy state (`/etc/security.cfg`)
+  - mode control: `normal`, `hardened`, `lockdown`
+  - app-type policy gates for custom/Linux/Windows/macOS compatibility paths
+- Two automatic failsafes:
+  - **Intrusion failsafe:** event-threshold trigger with optional network kill-switch
+  - **Integrity failsafe:** boot-time verification of `/etc/security_manifest.txt`
+- Integrity manifest generation in build pipeline (`tools/generate_security_manifest.py`) with SHA-256 hashing of critical files.
+- Hardened shell policy:
+  - `run` execution is restricted to `/bin/*` only.
+  - all shell paths are canonicalized (`.`/`..` normalized) before policy checks.
+  - direct `write` to protected security/kernel paths is blocked and audited.
+  - direct `mkdir` under `/etc`, `/bin`, `/boot` is blocked and audited.
+  - direct `cat` on sensitive license files is blocked and audited.
+  - privileged shell commands generate audit events (`CMD_PRIVILEGED`).
 
 ### License system
 - EULA terms file in rootfs: `/etc/LICENSE.txt`.
@@ -202,9 +238,18 @@ Features:
   - `/etc/ecosystem_apps.txt`
   - `/etc/ecosystem_index.csv`
   - `/etc/ecosystem_index.txt`
-- `run` and GUI app launch require:
-  - accepted terms (`license accept`)
+- Security integrity manifest in rootfs:
+  - `/etc/security_manifest.txt`
+- Full OS usage now requires a verified minimum license:
   - active valid non-revoked `QOS3` key
+  - commercial monthly policy (`subscription` bit set)
+  - tier at least `consumer` (consumer/enterprise/educational/server/oem)
+  - accepted terms (`license accept`)
+- If missing/invalid at boot, QuartzOS enters `LICENSE LOCK` mode:
+  - shell-only restricted command set
+  - GUI and network services remain locked
+  - unlock sequence: `license terms` -> `license accept` -> `license activate <key>` -> `license unlock`
+- `run` and GUI app launch enforce the same minimum policy.
 - Supported commercial tier names in issuer:
   `consumer`, `enterprise`, `educational`, `server`,
   `dev_standard`, `student_dev`, `startup_dev`, `open_lab`, `oem`

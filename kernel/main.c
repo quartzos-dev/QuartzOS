@@ -20,6 +20,7 @@
 #include <kernel/log.h>
 #include <kernel/mp.h>
 #include <kernel/panic.h>
+#include <kernel/security.h>
 #include <kernel/shell.h>
 #include <kernel/slog.h>
 #include <kernel/service.h>
@@ -342,7 +343,7 @@ static void service_task(void *arg) {
 }
 
 void kernel_main(void) {
-    const uint32_t boot_total_steps = 11;
+    const uint32_t boot_total_steps = 12;
     uint32_t boot_step = 0;
 
     serial_init();
@@ -465,15 +466,36 @@ void kernel_main(void) {
         kprintf("CRON: no persisted jobs\n");
     }
     service_init();
-    boot_splash("Runtime config + cron", ++boot_step, boot_total_steps);
+    security_init();
+    if (!security_load()) {
+        kprintf("SEC: no persisted security policy, using defaults\n");
+    }
+    char sec_report[160];
+    if (security_verify_integrity_now(sec_report, sizeof(sec_report))) {
+        kprintf("SEC: integrity ok (%s)\n", sec_report);
+    } else {
+        kprintf("SEC: integrity warning (%s)\n", sec_report);
+    }
+    boot_splash("Runtime config + security", ++boot_step, boot_total_steps);
 
     tasking_init();
     net_init();
     license_init();
-    kprintf("LICENSE: loaded=%u revoked=%u active=%s\n",
+    int license_ready = license_usage_allowed() ? 1 : 0;
+    int security_ready = security_lockdown_active() ? 0 : 1;
+    kprintf("LICENSE: loaded=%u revoked=%u active=%s usage=%s\n",
             (unsigned)license_registered_count(),
             (unsigned)license_revoked_count(),
-            license_is_active() ? "yes" : "no");
+            license_is_active() ? "yes" : "no",
+            license_ready ? "yes" : "no");
+    if (!license_ready) {
+        kprintf("LICENSE: enforcement lock active (requires verified consumer monthly license)\n");
+        audit_log("LICENSE_BOOT_LOCK", "minimum-consumer-monthly");
+    }
+    kprintf("SECURITY: mode=%s failsafe(intrusion=%s integrity=%s)\n",
+            security_mode_name(security_mode()),
+            security_intrusion_failsafe_active() ? "on" : "off",
+            security_integrity_failsafe_active() ? "on" : "off");
     gui_init();
     shell_init();
     boot_splash("Shell + desktop services", ++boot_step, boot_total_steps);
@@ -488,46 +510,73 @@ void kernel_main(void) {
         panic("Failed to register net service");
     }
 
-    if (!service_start("gui")) {
-        panic("Failed to create GUI task");
-    }
     if (!service_start("shell")) {
         panic("Failed to create shell task");
     }
-    if (!service_start("net")) {
-        panic("Failed to create net task");
-    }
 
-    uint64_t gui_id = service_task_id("gui");
     uint64_t shell_id = service_task_id("shell");
-    uint64_t net_id = service_task_id("net");
-    if (gui_id == 0 || shell_id == 0 || net_id == 0) {
-        panic("Missing service task id");
+    if (shell_id == 0) {
+        panic("Missing shell service task id");
     }
 
-    const char *profile_name = config_get("boot.profile");
-    const boot_profile_t *profile = select_boot_profile(profile_name);
-    apply_boot_profile(profile, gui_id, shell_id, net_id);
-    kprintf("BOOT: profile=%s\n", profile->name);
-    boot_splash("Scheduling profile", ++boot_step, boot_total_steps);
+    if (!service_start("gui")) {
+        panic("Failed to create GUI task");
+    }
+    uint64_t gui_id = service_task_id("gui");
+    if (gui_id == 0) {
+        panic("Missing GUI service task id");
+    }
 
-    const char *quantum_cfg = config_get("sched.quantum");
-    if (quantum_cfg) {
-        uint32_t q = 0;
-        if (parse_u32_dec(quantum_cfg, &q) && q > 0) {
-            task_set_quantum_ticks(q);
-            kprintf("SCHED: quantum override=%u\n", (unsigned)q);
+    if (license_ready && security_ready) {
+        if (!service_start("net")) {
+            panic("Failed to create net task");
+        }
+
+        uint64_t net_id = service_task_id("net");
+        if (net_id == 0) {
+            panic("Missing service task id");
+        }
+
+        const char *profile_name = config_get("boot.profile");
+        const boot_profile_t *profile = select_boot_profile(profile_name);
+        apply_boot_profile(profile, gui_id, shell_id, net_id);
+        kprintf("BOOT: profile=%s\n", profile->name);
+    } else {
+        (void)service_set_policy("net", SERVICE_POLICY_MANUAL);
+        (void)service_stop("net");
+        task_set_quantum_ticks(12);
+        (void)task_set_priority(gui_id, 12);
+        (void)task_set_realtime(gui_id, false);
+        (void)task_set_priority(shell_id, 24);
+        (void)task_set_realtime(shell_id, true);
+        kprintf("BOOT: profile=%s\n", license_ready ? "security-lock" : "license-lock");
+        kprintf("GUI: restricted desktop running in lock mode\n");
+        kprintf("LICENSE: unlock with: license terms -> license accept -> license activate <QOS3-key> -> license unlock\n");
+        if (!security_ready) {
+            kprintf("SECURITY: unlock with: security status -> security verify -> security failsafe reset all\n");
         }
     }
+    boot_splash("Scheduling profile", ++boot_step, boot_total_steps);
 
-    const char *net_policy_cfg = config_get("service.net.policy");
-    if (net_policy_cfg) {
-        if (strcmp(net_policy_cfg, "manual") == 0) {
-            (void)service_set_policy("net", SERVICE_POLICY_MANUAL);
-            (void)service_stop("net");
-        } else if (strcmp(net_policy_cfg, "always") == 0) {
-            (void)service_set_policy("net", SERVICE_POLICY_ALWAYS);
-            (void)service_start("net");
+    if (license_ready && security_ready) {
+        const char *quantum_cfg = config_get("sched.quantum");
+        if (quantum_cfg) {
+            uint32_t q = 0;
+            if (parse_u32_dec(quantum_cfg, &q) && q > 0) {
+                task_set_quantum_ticks(q);
+                kprintf("SCHED: quantum override=%u\n", (unsigned)q);
+            }
+        }
+
+        const char *net_policy_cfg = config_get("service.net.policy");
+        if (net_policy_cfg) {
+            if (strcmp(net_policy_cfg, "manual") == 0) {
+                (void)service_set_policy("net", SERVICE_POLICY_MANUAL);
+                (void)service_stop("net");
+            } else if (strcmp(net_policy_cfg, "always") == 0) {
+                (void)service_set_policy("net", SERVICE_POLICY_ALWAYS);
+                (void)service_start("net");
+            }
         }
     }
 

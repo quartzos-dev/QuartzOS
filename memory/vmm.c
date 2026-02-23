@@ -41,6 +41,30 @@ static uint64_t *get_or_create(uint64_t *table, uint16_t index, uint64_t flags) 
     return phys_to_virt(table[index] & ~0xFFFULL);
 }
 
+static uint64_t *lookup_pte_locked(uint64_t virt) {
+    uint16_t pml4_i = (virt >> 39) & 0x1FF;
+    uint16_t pdpt_i = (virt >> 30) & 0x1FF;
+    uint16_t pd_i = (virt >> 21) & 0x1FF;
+    uint16_t pt_i = (virt >> 12) & 0x1FF;
+
+    if (!(kernel_pml4[pml4_i] & VMM_PRESENT)) {
+        return 0;
+    }
+    uint64_t *pdpt = phys_to_virt(kernel_pml4[pml4_i] & ~0xFFFULL);
+    if (!(pdpt[pdpt_i] & VMM_PRESENT)) {
+        return 0;
+    }
+    uint64_t *pd = phys_to_virt(pdpt[pdpt_i] & ~0xFFFULL);
+    if (!(pd[pd_i] & VMM_PRESENT)) {
+        return 0;
+    }
+    uint64_t *pt = phys_to_virt(pd[pd_i] & ~0xFFFULL);
+    if (!(pt[pt_i] & VMM_PRESENT)) {
+        return 0;
+    }
+    return &pt[pt_i];
+}
+
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     vmm_lock_acquire();
     uint16_t pml4_i = (virt >> 39) & 0x1FF;
@@ -72,61 +96,43 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
 void vmm_unmap_page(uint64_t virt) {
     vmm_lock_acquire();
-    uint16_t pml4_i = (virt >> 39) & 0x1FF;
-    uint16_t pdpt_i = (virt >> 30) & 0x1FF;
-    uint16_t pd_i = (virt >> 21) & 0x1FF;
-    uint16_t pt_i = (virt >> 12) & 0x1FF;
-
-    if (!(kernel_pml4[pml4_i] & 1)) {
+    uint64_t *pte = lookup_pte_locked(virt);
+    if (!pte) {
         vmm_lock_release();
         return;
     }
-    uint64_t *pdpt = phys_to_virt(kernel_pml4[pml4_i] & ~0xFFFULL);
-    if (!(pdpt[pdpt_i] & 1)) {
-        vmm_lock_release();
-        return;
-    }
-    uint64_t *pd = phys_to_virt(pdpt[pdpt_i] & ~0xFFFULL);
-    if (!(pd[pd_i] & 1)) {
-        vmm_lock_release();
-        return;
-    }
-    uint64_t *pt = phys_to_virt(pd[pd_i] & ~0xFFFULL);
-    pt[pt_i] = 0;
+    *pte = 0;
     __asm__ volatile("invlpg (%0)" : : "r"((void *)virt) : "memory");
     vmm_lock_release();
 }
 
 uint64_t vmm_translate(uint64_t virt) {
     vmm_lock_acquire();
-    uint16_t pml4_i = (virt >> 39) & 0x1FF;
-    uint16_t pdpt_i = (virt >> 30) & 0x1FF;
-    uint16_t pd_i = (virt >> 21) & 0x1FF;
-    uint16_t pt_i = (virt >> 12) & 0x1FF;
-
-    if (!(kernel_pml4[pml4_i] & 1)) {
+    uint64_t *pte = lookup_pte_locked(virt);
+    if (!pte) {
         vmm_lock_release();
         return 0;
     }
-    uint64_t *pdpt = phys_to_virt(kernel_pml4[pml4_i] & ~0xFFFULL);
-    if (!(pdpt[pdpt_i] & 1)) {
-        vmm_lock_release();
-        return 0;
-    }
-    uint64_t *pd = phys_to_virt(pdpt[pdpt_i] & ~0xFFFULL);
-    if (!(pd[pd_i] & 1)) {
-        vmm_lock_release();
-        return 0;
-    }
-    uint64_t *pt = phys_to_virt(pd[pd_i] & ~0xFFFULL);
-    if (!(pt[pt_i] & 1)) {
-        vmm_lock_release();
-        return 0;
-    }
-
-    uint64_t phys = (pt[pt_i] & ~0xFFFULL) | (virt & 0xFFFULL);
+    uint64_t phys = (*pte & ~0xFFFULL) | (virt & 0xFFFULL);
     vmm_lock_release();
     return phys;
+}
+
+bool vmm_query_page(uint64_t virt, uint64_t *phys_out, uint64_t *flags_out) {
+    bool ok = false;
+    vmm_lock_acquire();
+    uint64_t *pte = lookup_pte_locked(virt);
+    if (pte) {
+        if (phys_out) {
+            *phys_out = (*pte & ~0xFFFULL) | (virt & 0xFFFULL);
+        }
+        if (flags_out) {
+            *flags_out = *pte & (0xFFFULL | VMM_NX);
+        }
+        ok = true;
+    }
+    vmm_lock_release();
+    return ok;
 }
 
 void vmm_map_range(uint64_t virt, uint64_t phys, size_t size, uint64_t flags) {

@@ -1,6 +1,7 @@
 #ifndef MEMORY_VMM_H
 #define MEMORY_VMM_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -15,6 +16,7 @@ void vmm_init(uint64_t hhdm_offset);
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap_page(uint64_t virt);
 uint64_t vmm_translate(uint64_t virt);
+bool vmm_query_page(uint64_t virt, uint64_t *phys_out, uint64_t *flags_out);
 void vmm_map_range(uint64_t virt, uint64_t phys, size_t size, uint64_t flags);
 uint64_t vmm_hhdm_offset(void);
 

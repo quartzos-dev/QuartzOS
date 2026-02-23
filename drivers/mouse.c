@@ -21,14 +21,32 @@ static int abs_i(int value) {
 }
 
 static int accel_delta(int delta, int mag) {
+    if (delta == 0) {
+        return 0;
+    }
+
     int scale = 100;
-    if (mag > 2) {
-        scale += (mag - 2) * 12;
+    if (mag > 1) {
+        scale += (mag - 1) * 7;
     }
-    if (scale > 220) {
-        scale = 220;
+    if (mag > 8) {
+        scale += (mag - 8) * 4;
     }
-    int out = (delta * scale) / 100;
+    if (scale > 240) {
+        scale = 240;
+    }
+
+    int sign = delta < 0 ? -1 : 1;
+    int abs_delta = abs_i(delta);
+    int out = (abs_delta * scale + 50) / 100;
+    if (out == 0) {
+        out = 1;
+    }
+    if (out > 36) {
+        out = 36;
+    }
+    out *= sign;
+
     if (out == 0 && delta != 0) {
         out = delta > 0 ? 1 : -1;
     }
@@ -164,18 +182,27 @@ mouse_state_t mouse_get_state(void) {
     int dist_y = abs_i(target_y_fp - smooth_y_fp) >> MOUSE_FP_SHIFT;
     int dist = dist_x > dist_y ? dist_x : dist_y;
 
-    int alpha = 224;
-    if (dist > 8) {
-        alpha = 252;
+    int alpha = 238;
+    if (dist > 14) {
+        alpha = 255;
+    } else if (dist > 8) {
+        alpha = 250;
     } else if (dist > 3) {
-        alpha = 240;
+        alpha = 244;
+    } else if (dist <= 1) {
+        alpha = 212;
     }
     if (g_mouse.left || g_mouse.right || g_mouse.middle) {
         alpha = 252;
     }
 
-    smooth_x_fp = smooth_step(smooth_x_fp, target_x_fp, alpha);
-    smooth_y_fp = smooth_step(smooth_y_fp, target_y_fp, alpha);
+    if (dist <= 1) {
+        smooth_x_fp = target_x_fp;
+        smooth_y_fp = target_y_fp;
+    } else {
+        smooth_x_fp = smooth_step(smooth_x_fp, target_x_fp, alpha);
+        smooth_y_fp = smooth_step(smooth_y_fp, target_y_fp, alpha);
+    }
 
     g_mouse.x = clamp_coord(smooth_x_fp >> MOUSE_FP_SHIFT, limit_x);
     g_mouse.y = clamp_coord(smooth_y_fp >> MOUSE_FP_SHIFT, limit_y);

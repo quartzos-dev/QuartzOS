@@ -15,7 +15,8 @@ typedef enum license_error {
     LICENSE_ERR_REVOKED = 4,
     LICENSE_ERR_LOCKED = 5,
     LICENSE_ERR_STATE_TAMPER = 6,
-    LICENSE_ERR_LEGACY_DISABLED = 7
+    LICENSE_ERR_LEGACY_DISABLED = 7,
+    LICENSE_ERR_MINIMUM_TIER = 8
 } license_error_t;
 
 void license_init(void);

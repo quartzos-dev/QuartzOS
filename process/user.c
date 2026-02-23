@@ -8,11 +8,19 @@
 
 #define ELF_MAGIC 0x464c457fU
 #define PT_LOAD 1
+#define PF_X 0x1u
+#define PF_W 0x2u
+#define ELFCLASS64 2u
+#define ELFDATA2LSB 1u
+#define EV_CURRENT 1u
+#define ET_EXEC 2u
+#define EM_X86_64 0x3Eu
 #define USER_STACK_TOP 0x0000007000000000ULL
 #define USER_STACK_PAGES 16
 #define USER_IMAGE_MIN 0x0000000000001000ULL
 #define USER_IMAGE_MAX (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
 #define USER_MAX_MAPPED_PAGES 8192
+#define USER_MAX_PHDRS 256
 
 typedef struct elf64_ehdr {
     uint32_t e_magic;
@@ -53,6 +61,7 @@ static volatile int g_user_in_ring3;
 typedef struct mapped_page {
     uint64_t virt;
     uint64_t phys;
+    uint64_t final_flags;
 } mapped_page_t;
 
 static mapped_page_t g_user_pages[USER_MAX_MAPPED_PAGES];
@@ -66,13 +75,68 @@ static void user_unmap_all_pages(void) {
     g_user_page_count = 0;
 }
 
-static int track_user_page(uint64_t virt, uint64_t phys) {
+static mapped_page_t *find_user_page(uint64_t virt) {
+    for (size_t i = 0; i < g_user_page_count; i++) {
+        if (g_user_pages[i].virt == virt) {
+            return &g_user_pages[i];
+        }
+    }
+    return 0;
+}
+
+static int track_user_page(uint64_t virt, uint64_t phys, uint64_t final_flags) {
+    mapped_page_t *existing = find_user_page(virt);
+    if (existing) {
+        if (existing->phys != phys) {
+            return 0;
+        }
+        existing->final_flags |= (final_flags & (0xFFFULL | VMM_NX));
+        if ((existing->final_flags & VMM_WRITE) != 0) {
+            existing->final_flags |= VMM_NX;
+        }
+        return 1;
+    }
+
     if (g_user_page_count >= USER_MAX_MAPPED_PAGES) {
         return 0;
     }
     g_user_pages[g_user_page_count].virt = virt;
     g_user_pages[g_user_page_count].phys = phys;
+    g_user_pages[g_user_page_count].final_flags = final_flags & (0xFFFULL | VMM_NX);
+    if ((g_user_pages[g_user_page_count].final_flags & VMM_WRITE) != 0) {
+        g_user_pages[g_user_page_count].final_flags |= VMM_NX;
+    }
     g_user_page_count++;
+    return 1;
+}
+
+static uint64_t final_flags_from_program(uint32_t prog_flags) {
+    uint64_t map = VMM_PRESENT | VMM_USER;
+    if ((prog_flags & PF_W) != 0) {
+        map |= VMM_WRITE;
+    }
+    if ((prog_flags & PF_X) == 0) {
+        map |= VMM_NX;
+    }
+    if ((map & VMM_WRITE) != 0) {
+        map |= VMM_NX;
+    }
+    return map;
+}
+
+static int apply_user_page_permissions(void) {
+    for (size_t i = 0; i < g_user_page_count; i++) {
+        mapped_page_t *page = &g_user_pages[i];
+        uint64_t phys = vmm_translate(page->virt);
+        if (phys == 0 || (phys & ~0xFFFULL) != page->phys) {
+            return 0;
+        }
+        uint64_t final = page->final_flags | VMM_PRESENT | VMM_USER;
+        if ((final & VMM_WRITE) != 0) {
+            final |= VMM_NX;
+        }
+        vmm_map_page(page->virt, page->phys, final);
+    }
     return 1;
 }
 
@@ -92,10 +156,18 @@ static int map_segment(uint64_t vaddr, const uint8_t *src, uint64_t filesz, uint
     if (end < start || end > USER_IMAGE_MAX) {
         return 0;
     }
+    uint64_t final_flags = final_flags_from_program(flags);
 
     for (uint64_t addr = start; addr < end; addr += PAGE_SIZE) {
-        if (vmm_translate(addr) != 0) {
+        mapped_page_t *existing = find_user_page(addr);
+        if (existing) {
+            if (!track_user_page(addr, existing->phys, final_flags)) {
+                return 0;
+            }
             continue;
+        }
+        if (vmm_translate(addr) != 0) {
+            return 0;
         }
 
         uint64_t phys = pmm_alloc_page();
@@ -103,13 +175,10 @@ static int map_segment(uint64_t vaddr, const uint8_t *src, uint64_t filesz, uint
             return 0;
         }
 
-        uint64_t map_flags = VMM_PRESENT | VMM_USER | VMM_WRITE;
-        if ((flags & 1) == 0) {
-            map_flags |= VMM_NX;
-        }
+        uint64_t map_flags = final_flags | VMM_WRITE | VMM_NX;
 
         vmm_map_page(addr, phys, map_flags);
-        if (!track_user_page(addr, phys)) {
+        if (!track_user_page(addr, phys, final_flags)) {
             vmm_unmap_page(addr);
             pmm_free_page(phys);
             return 0;
@@ -131,14 +200,14 @@ static int map_user_stack(void) {
     uint64_t start = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
     for (uint64_t addr = start; addr < USER_STACK_TOP; addr += PAGE_SIZE) {
         if (vmm_translate(addr) != 0) {
-            continue;
+            return 0;
         }
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
             return 0;
         }
         vmm_map_page(addr, phys, VMM_PRESENT | VMM_WRITE | VMM_USER | VMM_NX);
-        if (!track_user_page(addr, phys)) {
+        if (!track_user_page(addr, phys, VMM_PRESENT | VMM_WRITE | VMM_USER | VMM_NX)) {
             vmm_unmap_page(addr);
             pmm_free_page(phys);
             return 0;
@@ -157,6 +226,17 @@ bool user_run_elf(const void *image, size_t size) {
         eh->e_phentsize < sizeof(elf64_phdr_t)) {
         return false;
     }
+    if (eh->e_ident_rest[0] != ELFCLASS64 ||
+        eh->e_ident_rest[1] != ELFDATA2LSB ||
+        eh->e_ident_rest[2] != EV_CURRENT) {
+        return false;
+    }
+    if (eh->e_type != ET_EXEC || eh->e_machine != EM_X86_64 || eh->e_version != EV_CURRENT) {
+        return false;
+    }
+    if (eh->e_ehsize < sizeof(elf64_ehdr_t) || eh->e_phnum > USER_MAX_PHDRS) {
+        return false;
+    }
     if (eh->e_phoff >= size) {
         return false;
     }
@@ -170,6 +250,7 @@ bool user_run_elf(const void *image, size_t size) {
 
     g_user_page_count = 0;
     const uint8_t *base = (const uint8_t *)image;
+    int has_load = 0;
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         uint64_t off = eh->e_phoff + (uint64_t)i * eh->e_phentsize;
         if (off + sizeof(elf64_phdr_t) > size) {
@@ -180,6 +261,15 @@ bool user_run_elf(const void *image, size_t size) {
         const elf64_phdr_t *ph = (const elf64_phdr_t *)(base + off);
         if (ph->p_type != PT_LOAD) {
             continue;
+        }
+        has_load = 1;
+        if (ph->p_align != 0 && (ph->p_align & (ph->p_align - 1u)) != 0) {
+            user_unmap_all_pages();
+            return false;
+        }
+        if (ph->p_vaddr % PAGE_SIZE != ph->p_offset % PAGE_SIZE) {
+            user_unmap_all_pages();
+            return false;
         }
 
         if (ph->p_offset + ph->p_filesz > size) {
@@ -194,6 +284,10 @@ bool user_run_elf(const void *image, size_t size) {
     }
 
     if (!map_user_stack()) {
+        user_unmap_all_pages();
+        return false;
+    }
+    if (!has_load || !apply_user_page_permissions()) {
         user_unmap_all_pages();
         return false;
     }
@@ -215,6 +309,41 @@ bool user_run_elf(const void *image, size_t size) {
 
 bool user_active(void) {
     return g_user_active != 0;
+}
+
+bool user_pointer_readable(const void *ptr, size_t len) {
+    if (!ptr) {
+        return false;
+    }
+    if (len == 0) {
+        return true;
+    }
+
+    uint64_t start = (uint64_t)(uintptr_t)ptr;
+    if (start < USER_IMAGE_MIN || start >= USER_STACK_TOP) {
+        return false;
+    }
+    uint64_t last = start + (uint64_t)len - 1u;
+    if (last < start || last >= USER_STACK_TOP) {
+        return false;
+    }
+
+    uint64_t page = start & ~(PAGE_SIZE - 1ULL);
+    uint64_t end_page = last & ~(PAGE_SIZE - 1ULL);
+    while (1) {
+        uint64_t flags = 0;
+        if (!vmm_query_page(page, 0, &flags)) {
+            return false;
+        }
+        if ((flags & (VMM_PRESENT | VMM_USER)) != (VMM_PRESENT | VMM_USER)) {
+            return false;
+        }
+        if (page == end_page) {
+            break;
+        }
+        page += PAGE_SIZE;
+    }
+    return true;
 }
 
 void user_exit_current(void) {

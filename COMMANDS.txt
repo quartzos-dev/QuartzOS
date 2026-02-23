@@ -91,6 +91,24 @@ license accept
 license activate <QOS3-KEY>
 run /bin/greeter
 
+12b) In-OS security hardening commands (run inside QuartzOS shell)
+------------------------------------------------------------------
+security status
+security verify
+security features 1
+security mode hardened
+security failsafe status
+security threshold 24
+security save
+
+12c) In-OS compatibility app commands (run inside QuartzOS shell)
+-----------------------------------------------------------------
+compat probe /bin/secdiag_win.exe
+compat probe /bin/secdiag_mac.app
+compat run /bin/secdiag_win.exe
+compat run /bin/secdiag_mac.app
+run /bin/secdiag_linux.bin
+
 13) New GUI controls (mouse)
 ----------------------------
 Top bar:

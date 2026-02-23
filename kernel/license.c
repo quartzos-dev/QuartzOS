@@ -26,6 +26,14 @@
 #define LICENSE_MAX_FAILS 5u
 #define LICENSE_TERMS_MAX_BYTES (256u * 1024u)
 
+#define LICENSE_POLICY_SUBSCRIPTION 0x40u
+
+#define LICENSE_TIER_CONSUMER 0x01u
+#define LICENSE_TIER_ENTERPRISE 0x02u
+#define LICENSE_TIER_EDUCATIONAL 0x03u
+#define LICENSE_TIER_SERVER 0x04u
+#define LICENSE_TIER_OEM 0x09u
+
 typedef enum key_version {
     KEY_VERSION_INVALID = 0,
     KEY_VERSION_V1 = 1,
@@ -409,6 +417,23 @@ static const char *tier_name_for_code(uint8_t code) {
         case 0x08: return "open_lab";
         case 0x09: return "oem";
         default: return "unknown";
+    }
+}
+
+static int tier_meets_minimum_consumer_monthly(uint8_t tier_code, uint8_t policy_bits) {
+    if ((policy_bits & LICENSE_POLICY_SUBSCRIPTION) == 0) {
+        return 0;
+    }
+
+    switch (tier_code) {
+        case LICENSE_TIER_CONSUMER:
+        case LICENSE_TIER_ENTERPRISE:
+        case LICENSE_TIER_EDUCATIONAL:
+        case LICENSE_TIER_SERVER:
+        case LICENSE_TIER_OEM:
+            return 1;
+        default:
+            return 0;
     }
 }
 
@@ -1093,6 +1118,15 @@ static void load_state(void) {
     if (key_is_revoked(normalized, normalized_len)) {
         return;
     }
+    uint8_t tier = 0;
+    uint8_t policy = 0;
+    key_metadata(normalized, normalized_len, version, &tier, &policy);
+    if (!tier_meets_minimum_consumer_monthly(tier, policy)) {
+        g_last_error = LICENSE_ERR_MINIMUM_TIER;
+        audit_log("LICENSE_STATE_REJECT", "minimum-tier");
+        write_state_value("NONE");
+        return;
+    }
     set_active_key(normalized, normalized_len);
 }
 
@@ -1193,6 +1227,13 @@ bool license_activate(const char *key) {
         record_activation_failure(LICENSE_ERR_REVOKED, "revoked", 1);
         return false;
     }
+    uint8_t tier = 0;
+    uint8_t policy = 0;
+    key_metadata(normalized, key_len, version, &tier, &policy);
+    if (!tier_meets_minimum_consumer_monthly(tier, policy)) {
+        record_activation_failure(LICENSE_ERR_MINIMUM_TIER, "minimum-tier", 1);
+        return false;
+    }
 
     set_active_key(normalized, key_len);
     write_state_value(normalized);
@@ -1225,6 +1266,9 @@ bool license_is_active(void) {
 
 bool license_usage_allowed(void) {
     if (!license_is_active()) {
+        return false;
+    }
+    if (!tier_meets_minimum_consumer_monthly(g_active_tier_code, g_active_policy_bits)) {
         return false;
     }
     if (!g_terms_available) {
@@ -1339,6 +1383,7 @@ const char *license_error_text(license_error_t error) {
         case LICENSE_ERR_LOCKED: return "activation-locked";
         case LICENSE_ERR_STATE_TAMPER: return "state-tampered";
         case LICENSE_ERR_LEGACY_DISABLED: return "legacy-key-disabled";
+        case LICENSE_ERR_MINIMUM_TIER: return "minimum-tier-required";
         default: return "unknown";
     }
 }

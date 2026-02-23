@@ -974,6 +974,32 @@ def cmd_revoke(args: argparse.Namespace) -> None:
     print(f"revoked: {key}")
 
 
+def cmd_revoke_all(args: argparse.Namespace) -> None:
+    require_password(args.password)
+    secret_v2 = key_secret_v2()
+    secret_v3 = key_secret_v3()
+
+    db_keys = set(read_db(args.db, secret_v2, secret_v3))
+    revoked = set(read_revoked(args.revoked, secret_v2, secret_v3))
+    newly_revoked = sorted(db_keys - revoked)
+    revoked.update(db_keys)
+
+    write_revoked(args.revoked, sorted(revoked))
+    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    append_audit(
+        args.audit,
+        [(
+            ts,
+            "REVOKE_ALL",
+            "*",
+            args.actor,
+            args.note or f"revoked={len(newly_revoked)} total={len(revoked)}",
+        )],
+    )
+    seal_integrity(args)
+    print(f"revoke-all: issued={len(db_keys)} newly_revoked={len(newly_revoked)} total_revoked={len(revoked)}")
+
+
 def cmd_unrevoke(args: argparse.Namespace) -> None:
     require_password(args.password)
     secret_v2 = key_secret_v2()
@@ -1142,6 +1168,12 @@ def build_parser() -> argparse.ArgumentParser:
     revoke.add_argument("--password", help="issuer password (optional; prompt if omitted)")
     revoke.set_defaults(func=cmd_revoke)
 
+    revoke_all = sub.add_parser("revoke-all", help="revoke all issued keys (password required)")
+    revoke_all.add_argument("--actor", default="admin", help="operator name for audit log")
+    revoke_all.add_argument("--note", default="", help="optional audit note")
+    revoke_all.add_argument("--password", help="issuer password (optional; prompt if omitted)")
+    revoke_all.set_defaults(func=cmd_revoke_all)
+
     unrevoke = sub.add_parser("unrevoke", help="remove key from revocation list (password required)")
     unrevoke.add_argument("--key", required=True, help="license key")
     unrevoke.add_argument("--actor", default="admin", help="operator name for audit log")
@@ -1239,11 +1271,12 @@ def interactive_args() -> list[str] | None:
     print("  2) verify")
     print("  3) list")
     print("  4) revoke")
-    print("  5) unrevoke")
-    print("  6) verify-store")
-    print("  7) seal-store")
-    print("  8) harden-store")
-    print("  9) password-hash")
+    print("  5) revoke-all")
+    print("  6) unrevoke")
+    print("  7) verify-store")
+    print("  8) seal-store")
+    print("  9) harden-store")
+    print("  10) password-hash")
     print("  q) quit")
     while True:
         choice = prompt_text("select command", required=True).lower()
@@ -1290,7 +1323,14 @@ def interactive_args() -> list[str] | None:
             if note:
                 out.extend(["--note", note])
             return out
-        if choice in ("5", "unrevoke"):
+        if choice in ("5", "revoke-all"):
+            actor = prompt_text("actor", "admin", required=True)
+            note = prompt_text("note", "", required=False)
+            out = ["revoke-all", "--actor", actor]
+            if note:
+                out.extend(["--note", note])
+            return out
+        if choice in ("6", "unrevoke"):
             key = prompt_text("license key", required=True)
             actor = prompt_text("actor", "admin", required=True)
             note = prompt_text("note", "", required=False)
@@ -1298,17 +1338,17 @@ def interactive_args() -> list[str] | None:
             if note:
                 out.extend(["--note", note])
             return out
-        if choice in ("6", "verify-store"):
+        if choice in ("7", "verify-store"):
             require_manifest = prompt_yes_no("require integrity manifest", default=True)
             out = ["verify-store"]
             if require_manifest:
                 out.append("--require-manifest")
             return out
-        if choice in ("7", "seal-store"):
+        if choice in ("8", "seal-store"):
             return ["seal-store"]
-        if choice in ("8", "harden-store"):
+        if choice in ("9", "harden-store"):
             return ["harden-store"]
-        if choice in ("9", "password-hash"):
+        if choice in ("10", "password-hash"):
             iterations = prompt_int("iterations", DEFAULT_ADMIN_ITERATIONS, 100000, 2000000)
             return ["password-hash", "--iterations", str(iterations)]
         print("invalid selection")

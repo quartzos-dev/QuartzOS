@@ -67,6 +67,7 @@ Revoke / unrevoke:
 
 ```bash
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py revoke --key QOS3-...
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py revoke-all
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py unrevoke --key QOS3-...
 ```
 
