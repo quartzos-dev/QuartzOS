@@ -51,13 +51,19 @@ bash /Users/qian/Music/OS/build_and_launch.sh
 --------------------------
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --help
-python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py list --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py password-hash --algo scrypt --out /Users/qian/Music/OS/build/issuer_admin_hash.txt
+export QOS_ISSUER_ADMIN_HASH=\"$(cat /Users/qian/Music/OS/build/issuer_admin_hash.txt)\"
+export QOS_ISSUER_PASSWORD='YOUR_ISSUER_PASSWORD'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD list --show
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py verify --key 'QOS2-0A0B0C0D-0001-10203040-2BCE3A12C18C12DB'
-python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py issue --owner 'qian' --tier enterprise --version qos3 --count 1 --password 'QuartzOS-Admin-2026!'
-python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py issue --owner 'legacy-test' --tier consumer --version qos2 --allow-legacy --count 1 --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD issue --owner 'qian' --tier enterprise --version qos3 --count 1
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD deactivate-legacy --purge --actor admin
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD lookup --tracking-id 'QTK-YYYYMMDD-XXXXXXXXXX'
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py verify-store --require-manifest
-python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py seal-store --password 'QuartzOS-Admin-2026!'
-python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py harden-store --password 'QuartzOS-Admin-2026!'
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD seal-store
+python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD harden-store
+./QuartzOS-license-issuer/macos_app/build_macos_app.sh
+open \"/Users/qian/Music/OS/build/QuartzOS License Issuer.app\"
 
 9) Open tier differences text file
 ----------------------------------

@@ -2,6 +2,7 @@
 #include <filesystem/sfs.h>
 #include <kernel/audit.h>
 #include <kernel/license.h>
+#include <kernel/security.h>
 #include <kernel/secure_store.h>
 #include <lib/string.h>
 #include <memory/heap.h>
@@ -21,9 +22,9 @@
 #define LICENSE_REQUIRE_MODERN_ACTIVATION 1
 
 #define LICENSE_HZ 100u
-#define LICENSE_FAIL_WINDOW_TICKS (10u * LICENSE_HZ)
-#define LICENSE_LOCKOUT_TICKS (30u * LICENSE_HZ)
-#define LICENSE_MAX_FAILS 5u
+#define LICENSE_FAIL_WINDOW_TICKS (30u * LICENSE_HZ)
+#define LICENSE_LOCKOUT_TICKS (120u * LICENSE_HZ)
+#define LICENSE_MAX_FAILS 3u
 #define LICENSE_TERMS_MAX_BYTES (256u * 1024u)
 
 #define LICENSE_POLICY_SUBSCRIPTION 0x40u
@@ -94,6 +95,13 @@ static license_error_t g_last_error = LICENSE_ERR_NONE;
 static int g_terms_available;
 static int g_terms_accepted;
 static char g_terms_hash[65];
+
+static int version_allowed(key_version_t version) {
+    if (!LICENSE_REQUIRE_MODERN_ACTIVATION) {
+        return version != KEY_VERSION_INVALID;
+    }
+    return version == KEY_VERSION_V3;
+}
 
 static uint32_t rotr32(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32u - n));
@@ -780,6 +788,9 @@ static void load_key_file(const char *path, key_entry_t *entries, size_t max_ent
         if (!normalize_key(raw, normalized, &normalized_len, &version)) {
             continue;
         }
+        if (!version_allowed(version)) {
+            continue;
+        }
         if (!key_signature_matches(normalized, normalized_len, version)) {
             continue;
         }
@@ -968,6 +979,7 @@ static void clear_failures(void) {
 
 static void record_activation_failure(license_error_t err, const char *detail, int count_failure) {
     g_last_error = err;
+    security_note_event(SECURITY_EVENT_AUTH_FAIL, detail ? detail : "license-auth-fail");
 
     if (count_failure) {
         uint64_t now = now_ticks();
@@ -1106,7 +1118,7 @@ static void load_state(void) {
     if (!normalize_key(value, normalized, &normalized_len, &version)) {
         return;
     }
-    if (LICENSE_REQUIRE_MODERN_ACTIVATION && version != KEY_VERSION_V3) {
+    if (!version_allowed(version)) {
         return;
     }
     if (!key_signature_matches(normalized, normalized_len, version)) {
@@ -1168,6 +1180,9 @@ bool license_signature_valid(const char *key) {
     if (!normalize_key(key, normalized, &key_len, &version)) {
         return false;
     }
+    if (!version_allowed(version)) {
+        return false;
+    }
     return key_signature_matches(normalized, key_len, version) != 0;
 }
 
@@ -1176,6 +1191,9 @@ bool license_registered(const char *key) {
     size_t key_len = 0;
     key_version_t version = KEY_VERSION_INVALID;
     if (!normalize_key(key, normalized, &key_len, &version)) {
+        return false;
+    }
+    if (!version_allowed(version)) {
         return false;
     }
     if (!key_signature_matches(normalized, key_len, version)) {
@@ -1189,6 +1207,9 @@ bool license_key_revoked(const char *key) {
     size_t key_len = 0;
     key_version_t version = KEY_VERSION_INVALID;
     if (!normalize_key(key, normalized, &key_len, &version)) {
+        return false;
+    }
+    if (!version_allowed(version)) {
         return false;
     }
     if (!key_signature_matches(normalized, key_len, version)) {
@@ -1211,7 +1232,7 @@ bool license_activate(const char *key) {
         record_activation_failure(LICENSE_ERR_FORMAT, "format", 1);
         return false;
     }
-    if (LICENSE_REQUIRE_MODERN_ACTIVATION && version != KEY_VERSION_V3) {
+    if (!version_allowed(version)) {
         record_activation_failure(LICENSE_ERR_LEGACY_DISABLED, "legacy-disabled", 1);
         return false;
     }
@@ -1259,6 +1280,12 @@ bool license_is_active(void) {
         clear_active_key();
         write_state_value("NONE");
         audit_log("LICENSE_AUTO_DEACTIVATE", "key-invalidated");
+        return false;
+    }
+    if (!tier_meets_minimum_consumer_monthly(g_active_tier_code, g_active_policy_bits)) {
+        clear_active_key();
+        write_state_value("NONE");
+        audit_log("LICENSE_AUTO_DEACTIVATE", "minimum-tier");
         return false;
     }
     return true;

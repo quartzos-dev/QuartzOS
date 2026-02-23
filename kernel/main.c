@@ -519,12 +519,15 @@ void kernel_main(void) {
         panic("Missing shell service task id");
     }
 
-    if (!service_start("gui")) {
-        panic("Failed to create GUI task");
-    }
-    uint64_t gui_id = service_task_id("gui");
-    if (gui_id == 0) {
-        panic("Missing GUI service task id");
+    uint64_t gui_id = 0;
+    if (license_ready && security_ready) {
+        if (!service_start("gui")) {
+            panic("Failed to create GUI task");
+        }
+        gui_id = service_task_id("gui");
+        if (gui_id == 0) {
+            panic("Missing GUI service task id");
+        }
     }
 
     if (license_ready && security_ready) {
@@ -545,12 +548,14 @@ void kernel_main(void) {
         (void)service_set_policy("net", SERVICE_POLICY_MANUAL);
         (void)service_stop("net");
         task_set_quantum_ticks(12);
-        (void)task_set_priority(gui_id, 12);
-        (void)task_set_realtime(gui_id, false);
+        if (gui_id != 0) {
+            (void)task_set_priority(gui_id, 12);
+            (void)task_set_realtime(gui_id, false);
+        }
         (void)task_set_priority(shell_id, 24);
         (void)task_set_realtime(shell_id, true);
         kprintf("BOOT: profile=%s\n", license_ready ? "security-lock" : "license-lock");
-        kprintf("GUI: restricted desktop running in lock mode\n");
+        kprintf("GUI: desktop service disabled in lock mode\n");
         kprintf("LICENSE: unlock with: license terms -> license accept -> license activate <QOS3-key> -> license unlock\n");
         if (!security_ready) {
             kprintf("SECURITY: unlock with: security status -> security verify -> security failsafe reset all\n");

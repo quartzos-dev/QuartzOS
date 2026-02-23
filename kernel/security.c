@@ -1,6 +1,7 @@
 #include <drivers/pit.h>
 #include <filesystem/sfs.h>
 #include <kernel/audit.h>
+#include <kernel/license.h>
 #include <kernel/security.h>
 #include <kernel/secure_store.h>
 #include <kernel/service.h>
@@ -688,6 +689,10 @@ bool security_allow_network_ops(void) {
     if (!g_features[SECURITY_FEATURE_ENFORCE_NET_GUARDS]) {
         return true;
     }
+    if (g_features[SECURITY_FEATURE_ENFORCE_LICENSE_GATE] && !license_usage_allowed()) {
+        security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "network-license-gate");
+        return false;
+    }
     if (security_lockdown_active()) {
         security_note_event(SECURITY_EVENT_NET_BLOCKED, "lockdown");
         return false;
@@ -718,6 +723,14 @@ bool security_allow_app_launch(security_app_kind_t kind, bool wrapped,
                                char *reason, size_t reason_len) {
     if (reason && reason_len > 0) {
         reason[0] = '\0';
+    }
+
+    if (g_features[SECURITY_FEATURE_ENFORCE_LICENSE_GATE] && !license_usage_allowed()) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "verified license required");
+        }
+        security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "app-license-gate");
+        return false;
     }
 
     if (security_lockdown_active() && g_features[SECURITY_FEATURE_FAILSAFE_APP_KILLSWITCH]) {

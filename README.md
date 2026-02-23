@@ -254,8 +254,12 @@ Features:
   `consumer`, `enterprise`, `educational`, `server`,
   `dev_standard`, `student_dev`, `startup_dev`, `open_lab`, `oem`
 - Legacy issuance (`QOS1`/`QOS2`) is blocked by default in issuer.
-- Password-protected issuer app:
-  `QuartzOS-license-issuer/issue_license.py`
+- Legacy licenses can be deactivated/purged with:
+  `deactivate-legacy --purge`.
+- Password-protected issuer CLI:
+  `QuartzOS-license-issuer/issue_license.py`.
+- Native macOS issuer app wrapper:
+  `QuartzOS-license-issuer/macos_app/build_macos_app.sh`.
 
 ## Project layout
 
@@ -270,7 +274,7 @@ filesystem/    custom SFS
 gui/           desktop + window manager
 apps/          userspace app(s)
 assets/        rootfs seed assets (including license database)
-QuartzOS-license-issuer/password-protected license issuer app
+QuartzOS-license-issuer/ license issuer CLI + macOS app wrapper
 lib/           freestanding libc subset
 tools/         build helpers (rootfs builder, qemu runner)
 include/       headers

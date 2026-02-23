@@ -20,27 +20,21 @@ DEFAULT_DB = ROOT_DIR / "assets" / "licenses" / "licenses.db"
 DEFAULT_REVOKED = ROOT_DIR / "assets" / "licenses" / "licenses.revoked"
 DEFAULT_META = ROOT_DIR / "assets" / "licenses" / "licenses_meta.csv"
 DEFAULT_AUDIT = ROOT_DIR / "assets" / "licenses" / "licenses_audit.csv"
+DEFAULT_TRACKING = ROOT_DIR / "assets" / "licenses" / "licenses_tracking.csv"
 DEFAULT_INTEGRITY = ROOT_DIR / "assets" / "licenses" / "licenses_integrity.json"
 DEFAULT_PASSWORD_HASH_OUT = ROOT_DIR / "build" / "issuer_admin_hash.txt"
-
-DEFAULT_ADMIN_PASSWORD = "QuartzOS-Admin-2026!"
+DEFAULT_ADMIN_HASH_FILE = ROOT_DIR / "build" / "issuer_admin_hash.txt"
 DEFAULT_ADMIN_ITERATIONS = 240_000
-DEFAULT_ADMIN_SALT_HEX = "6f11717bf77eb6fd6808d4df576c02f6"
-DEFAULT_ADMIN_HASH_HEX = hashlib.pbkdf2_hmac(
-    "sha256",
-    DEFAULT_ADMIN_PASSWORD.encode("utf-8"),
-    bytes.fromhex(DEFAULT_ADMIN_SALT_HEX),
-    DEFAULT_ADMIN_ITERATIONS,
-).hex()
-DEFAULT_ADMIN_RECORD = (
-    f"pbkdf2_sha256${DEFAULT_ADMIN_ITERATIONS}"
-    f"${DEFAULT_ADMIN_SALT_HEX}${DEFAULT_ADMIN_HASH_HEX}"
-)
+DEFAULT_ADMIN_SCRYPT_N = 16384
+DEFAULT_ADMIN_SCRYPT_R = 8
+DEFAULT_ADMIN_SCRYPT_P = 1
+DEFAULT_ADMIN_RECORD = ""
 
 DEFAULT_HMAC_SECRET_V2 = "QuartzOS-Licensing-HMAC-Key-V2-2026"
 DEFAULT_HMAC_SECRET_V3 = "QuartzOS-Licensing-HMAC-Key-V3-2026"
 DEFAULT_INTEGRITY_SECRET = "QuartzOS-License-Store-Integrity-V1-2026"
 DEFAULT_FILE_ENC_SECRET = "QuartzOS-SecureStore-ENC-V1-2026"
+DEFAULT_TRACKING_SECRET = "QuartzOS-License-Tracking-V1-2026"
 SECURE_PREFIX = "QENC1|"
 SECURE_NONCE_BYTES = 8
 SECURE_TAG_BYTES = 32
@@ -86,6 +80,17 @@ class MetaRecord:
     feature_bits_hex: str
     nonce_hex: str
     key: str
+
+
+@dataclass(frozen=True)
+class TrackingRecord:
+    key: str
+    tracking_id: str
+    fingerprint: str
+    owner: str
+    tier: str
+    issued_at_utc: str
+    status: str
 
 
 TIERS: dict[str, TierSpec] = {
@@ -178,6 +183,32 @@ def policy_labels(bits: int) -> list[str]:
     if bits & POLICY_SUBSCRIPTION:
         out.append("subscription")
     return out
+
+
+def mask_key(key: str, keep: int = 6) -> str:
+    text = key.strip().upper()
+    if len(text) <= keep * 2:
+        return text
+    return f"{text[:keep]}...{text[-keep:]}"
+
+
+def tracking_secret() -> str:
+    return os.getenv("QOS_ISSUER_TRACKING_SECRET", DEFAULT_TRACKING_SECRET)
+
+
+def key_fingerprint(key: str) -> str:
+    digest = hmac.new(
+        tracking_secret().encode("utf-8"),
+        key.strip().upper().encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest().upper()
+    return digest[:20]
+
+
+def generate_tracking_id(now: dt.datetime | None = None) -> str:
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+    return f"QTK-{now:%Y%m%d}-{secrets.token_hex(5).upper()}"
 
 
 def normalize_tier_name(raw: str) -> str:
@@ -436,6 +467,108 @@ def append_audit(audit_path: Path, rows: list[tuple[str, str, str, str, str]]) -
     write_csv_rows_secure(audit_path, existing)
 
 
+def tracking_header() -> list[str]:
+    return ["key", "tracking_id", "fingerprint", "owner", "tier", "issued_at_utc", "status"]
+
+
+def read_tracking_rows(path: Path) -> list[TrackingRecord]:
+    if not path.exists():
+        return []
+    text = read_text_secure(path)
+    reader = csv.DictReader(io.StringIO(text))
+    out: list[TrackingRecord] = []
+    for row in reader:
+        if not row:
+            continue
+        key = (row.get("key") or "").strip().upper()
+        if not key:
+            continue
+        out.append(
+            TrackingRecord(
+                key=key,
+                tracking_id=(row.get("tracking_id") or "").strip().upper(),
+                fingerprint=(row.get("fingerprint") or "").strip().upper(),
+                owner=(row.get("owner") or "").strip(),
+                tier=(row.get("tier") or "").strip(),
+                issued_at_utc=(row.get("issued_at_utc") or "").strip(),
+                status=(row.get("status") or "").strip().lower(),
+            )
+        )
+    return out
+
+
+def write_tracking_rows(path: Path, rows: list[TrackingRecord]) -> None:
+    existing = [tracking_header()]
+    seen: set[str] = set()
+    for row in rows:
+        if row.key in seen:
+            continue
+        seen.add(row.key)
+        existing.append([
+            row.key,
+            row.tracking_id,
+            row.fingerprint,
+            row.owner,
+            row.tier,
+            row.issued_at_utc,
+            row.status,
+        ])
+    write_csv_rows_secure(path, existing)
+
+
+def upsert_tracking(path: Path, rows: list[TrackingRecord]) -> None:
+    current = {row.key: row for row in read_tracking_rows(path)}
+    for row in rows:
+        current[row.key] = row
+    write_tracking_rows(path, list(current.values()))
+
+
+def tracking_lookup_by_key(path: Path, key: str) -> TrackingRecord | None:
+    target = key.strip().upper()
+    for row in read_tracking_rows(path):
+        if row.key == target:
+            return row
+    return None
+
+
+def tracking_lookup_by_tracking_id(path: Path, tracking_id: str) -> TrackingRecord | None:
+    target = tracking_id.strip().upper()
+    if not target:
+        return None
+    for row in read_tracking_rows(path):
+        if row.tracking_id == target:
+            return row
+    return None
+
+
+def tracking_mark_status(path: Path, keys: set[str], status: str) -> None:
+    if not keys:
+        return
+    status_text = status.strip().lower()
+    rows = read_tracking_rows(path)
+    changed = False
+    out: list[TrackingRecord] = []
+    for row in rows:
+        if row.key in keys:
+            if row.status != status_text:
+                changed = True
+            out.append(
+                TrackingRecord(
+                    key=row.key,
+                    tracking_id=row.tracking_id,
+                    fingerprint=row.fingerprint,
+                    owner=row.owner,
+                    tier=row.tier,
+                    issued_at_utc=row.issued_at_utc,
+                    status=status_text,
+                )
+            )
+        else:
+            out.append(row)
+    if changed:
+        write_tracking_rows(path, out)
+
+
 def load_meta_key(meta_path: Path, key: str) -> MetaRecord | None:
     if not meta_path.exists():
         return None
@@ -467,49 +600,124 @@ def parse_int_arg(raw: str, bit_limit: int) -> int:
     return value & mask
 
 
-def make_password_record(password: str, iterations: int = DEFAULT_ADMIN_ITERATIONS, salt: bytes | None = None) -> str:
-    if iterations < 100_000:
-        raise ValueError("iterations must be >= 100000")
+def make_password_record(
+    password: str,
+    *,
+    algo: str = "scrypt",
+    iterations: int = DEFAULT_ADMIN_ITERATIONS,
+    salt: bytes | None = None,
+    scrypt_n: int = DEFAULT_ADMIN_SCRYPT_N,
+    scrypt_r: int = DEFAULT_ADMIN_SCRYPT_R,
+    scrypt_p: int = DEFAULT_ADMIN_SCRYPT_P,
+) -> str:
     if salt is None:
         salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+    if algo == "pbkdf2":
+        if iterations < 100_000:
+            raise ValueError("iterations must be >= 100000")
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+    if algo == "scrypt":
+        if scrypt_n < 16384 or scrypt_r < 8 or scrypt_p < 1:
+            raise ValueError("scrypt params too weak")
+        digest = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=scrypt_n,
+            r=scrypt_r,
+            p=scrypt_p,
+            dklen=32,
+            maxmem=0,
+        )
+        return f"scrypt${scrypt_n}${scrypt_r}${scrypt_p}${salt.hex()}${digest.hex()}"
+    raise ValueError(f"unsupported password hash algorithm: {algo}")
 
 
 def verify_password(password: str, record: str) -> bool:
     text = record.strip()
-    if not text.startswith("pbkdf2_sha256$"):
-        return False
+    if text.startswith("scrypt$"):
+        parts = text.split("$")
+        if len(parts) != 6:
+            return False
+        _, n_text, r_text, p_text, salt_hex, hash_hex = parts
+        try:
+            n = int(n_text)
+            r = int(r_text)
+            p = int(p_text)
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(hash_hex)
+        except ValueError:
+            return False
+        if n < 2 or r < 1 or p < 1:
+            return False
+        digest = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected),
+            maxmem=0,
+        )
+        return hmac.compare_digest(digest, expected)
 
-    parts = text.split("$")
-    if len(parts) != 4:
-        return False
+    if text.startswith("pbkdf2_sha256$"):
+        parts = text.split("$")
+        if len(parts) != 4:
+            return False
 
-    _, iter_text, salt_hex, hash_hex = parts
+        _, iter_text, salt_hex, hash_hex = parts
+        try:
+            iterations = int(iter_text)
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(hash_hex)
+        except ValueError:
+            return False
+
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(digest, expected)
+
+    return False
+
+
+def load_admin_hash_record() -> str:
+    configured = (os.getenv("QOS_ISSUER_ADMIN_HASH") or "").strip()
+    if configured:
+        return configured
     try:
-        iterations = int(iter_text)
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(hash_hex)
-    except ValueError:
-        return False
-
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return hmac.compare_digest(digest, expected)
+        if DEFAULT_ADMIN_HASH_FILE.exists():
+            for line in DEFAULT_ADMIN_HASH_FILE.read_text(encoding="utf-8").splitlines():
+                text = line.strip()
+                if text:
+                    return text
+    except OSError:
+        pass
+    return DEFAULT_ADMIN_RECORD
 
 
 def verify_admin_password(password: str) -> bool:
-    configured = os.getenv("QOS_ISSUER_ADMIN_HASH", DEFAULT_ADMIN_RECORD)
-    if not configured.strip().startswith("pbkdf2_sha256$"):
+    configured = load_admin_hash_record()
+    if not configured:
         print(
-            "error: QOS_ISSUER_ADMIN_HASH must use pbkdf2_sha256 format. "
-            "Generate one with: issue_license.py password-hash",
+            "error: issuer admin hash is not configured. "
+            "Run: issue_license.py password-hash --algo scrypt --out "
+            f"{DEFAULT_ADMIN_HASH_FILE}",
+            file=sys.stderr,
+        )
+        return False
+    if not (configured.startswith("scrypt$") or configured.startswith("pbkdf2_sha256$")):
+        print(
+            "error: invalid issuer admin hash format. "
+            "Supported: scrypt or pbkdf2_sha256",
             file=sys.stderr,
         )
         return False
     return verify_password(password, configured)
 
 
-def require_password(supplied: str | None) -> None:
+def require_password(supplied: str | None, password_env: str | None = None) -> None:
+    if supplied is None and password_env:
+        supplied = os.getenv(password_env)
     if supplied is None:
         supplied = getpass.getpass("Issuer password: ")
     if not verify_admin_password(supplied):
@@ -625,9 +833,9 @@ def canonical_json(data: dict) -> str:
     return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
-def compute_integrity_payload(db: Path, revoked: Path, meta: Path, audit: Path) -> dict:
+def compute_integrity_payload(db: Path, revoked: Path, meta: Path, audit: Path, tracking: Path) -> dict:
     return {
-        "schema": "qos-license-store-v1",
+        "schema": "qos-license-store-v2",
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "files": {
             "db": {
@@ -650,13 +858,18 @@ def compute_integrity_payload(db: Path, revoked: Path, meta: Path, audit: Path) 
                 "sha256": file_sha256(audit),
                 "size": audit.stat().st_size if audit.exists() else 0,
             },
+            "tracking": {
+                "path": str(tracking),
+                "sha256": file_sha256(tracking),
+                "size": tracking.stat().st_size if tracking.exists() else 0,
+            },
         },
     }
 
 
-def write_integrity_manifest(path: Path, db: Path, revoked: Path, meta: Path, audit: Path, secret: str) -> None:
+def write_integrity_manifest(path: Path, db: Path, revoked: Path, meta: Path, audit: Path, tracking: Path, secret: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = compute_integrity_payload(db, revoked, meta, audit)
+    payload = compute_integrity_payload(db, revoked, meta, audit, tracking)
     signature = hmac.new(secret.encode("utf-8"), canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
     wrapped = {"payload": payload, "hmac_sha256": signature}
     write_text_secure(path, json.dumps(wrapped, indent=2, sort_keys=True) + "\n")
@@ -668,6 +881,7 @@ def verify_integrity_manifest(
     revoked: Path,
     meta: Path,
     audit: Path,
+    tracking: Path,
     secret: str,
     require_manifest: bool,
 ) -> tuple[bool, list[str]]:
@@ -693,11 +907,11 @@ def verify_integrity_manifest(
     if not hmac.compare_digest(stored_sig, expected_sig):
         issues.append("integrity manifest HMAC mismatch")
 
-    expected_payload = compute_integrity_payload(db, revoked, meta, audit)
+    expected_payload = compute_integrity_payload(db, revoked, meta, audit, tracking)
     payload_files = payload.get("files") if isinstance(payload.get("files"), dict) else {}
     expected_files = expected_payload["files"]
 
-    for name in ("db", "revoked", "meta", "audit"):
+    for name in ("db", "revoked", "meta", "audit", "tracking"):
         current = expected_files[name]
         recorded = payload_files.get(name) if isinstance(payload_files, dict) else None
         if not isinstance(recorded, dict):
@@ -712,7 +926,15 @@ def verify_integrity_manifest(
 
 
 def seal_integrity(args: argparse.Namespace) -> None:
-    write_integrity_manifest(args.integrity, args.db, args.revoked, args.meta, args.audit, integrity_secret())
+    write_integrity_manifest(
+        args.integrity,
+        args.db,
+        args.revoked,
+        args.meta,
+        args.audit,
+        args.tracking,
+        integrity_secret(),
+    )
 
 
 def key_status(db_keys: set[str], revoked_keys: set[str], key: str) -> str:
@@ -751,7 +973,7 @@ def resolve_issue_profile(tier_name: str, version: str, feature_bits_override: s
 
 
 def cmd_issue(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     secret_v2 = key_secret_v2()
     secret_v3 = key_secret_v3()
 
@@ -782,15 +1004,12 @@ def cmd_issue(args: argparse.Namespace) -> None:
         key_id = secrets.randbits(32)
         if version == "qos1":
             key = make_key_v1(key_id, feature_bits)
-            nonce_hex = ""
         elif version == "qos2":
             nonce = secrets.randbits(32)
             key = make_key_v2(key_id, feature_bits, nonce, secret_v2)
-            nonce_hex = f"{nonce:08X}"
         else:
             nonce = secrets.randbits(32)
             key = make_key_v3(key_id, tier_code, policy_bits, nonce, secret_v3)
-            nonce_hex = f"{nonce:08X}"
 
         if key in db_keys or key in created:
             continue
@@ -803,9 +1022,11 @@ def cmd_issue(args: argparse.Namespace) -> None:
 
     ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     meta_rows: list[tuple[str, str, str, str, str, str, str, str]] = []
+    tracking_rows: list[TrackingRecord] = []
     audit_rows: list[tuple[str, str, str, str, str]] = []
     for key in created:
         parsed = parse_key(key)
+        tracking_id = generate_tracking_id()
         meta_rows.append(
             (
                 ts,
@@ -818,14 +1039,27 @@ def cmd_issue(args: argparse.Namespace) -> None:
                 key,
             )
         )
+        tracking_rows.append(
+            TrackingRecord(
+                key=key,
+                tracking_id=tracking_id,
+                fingerprint=key_fingerprint(key),
+                owner=args.owner,
+                tier=tier_name,
+                issued_at_utc=ts,
+                status="issued",
+            )
+        )
         note = tier_name
         if parsed.version == "qos3":
             labels = policy_labels(parsed.policy_bits)
             if labels:
                 note += f" policies={','.join(labels)}"
+        note += f" tracking={tracking_id}"
         audit_rows.append((ts, "ISSUE", key, args.owner, note))
 
     append_meta(args.meta, meta_rows)
+    upsert_tracking(args.tracking, tracking_rows)
     append_audit(args.audit, audit_rows)
     seal_integrity(args)
 
@@ -837,7 +1071,10 @@ def cmd_issue(args: argparse.Namespace) -> None:
         labels = policy_labels(policy_bits)
         print(f"qos3 profile: tier_code=0x{tier_code:02X} policy_bits=0x{policy_bits:02X} ({','.join(labels) if labels else 'none'})")
     for key in created:
-        print(key)
+        tracking = tracking_lookup_by_key(args.tracking, key)
+        track_id = tracking.tracking_id if tracking else "unknown"
+        label = key if args.show_keys else mask_key(key)
+        print(f"{label} tracking_id={track_id} fingerprint={key_fingerprint(key)}")
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
@@ -855,6 +1092,8 @@ def cmd_verify(args: argparse.Namespace) -> None:
     revoked_keys = set(read_revoked(args.revoked, secret_v2, secret_v3))
     issued = parsed.key in db_keys
     revoked = parsed.key in revoked_keys
+    legacy_blocked = parsed.version in ("qos1", "qos2")
+    tracking = tracking_lookup_by_key(args.tracking, parsed.key)
 
     meta = load_meta_key(args.meta, parsed.key)
     meta_ok = meta is not None
@@ -878,16 +1117,24 @@ def cmd_verify(args: argparse.Namespace) -> None:
         args.revoked,
         args.meta,
         args.audit,
+        args.tracking,
         integrity_secret(),
         require_manifest=args.strict,
     )
 
-    print(f"key: {parsed.key}")
+    display_key = parsed.key if args.reveal else mask_key(parsed.key)
+    print(f"key: {display_key}")
     print(f"version: {parsed.version}")
-    print(f"legacy: {'yes (deprecated)' if parsed.version in ('qos1', 'qos2') else 'no'}")
+    print(f"legacy: {'yes (deactivated)' if legacy_blocked else 'no'}")
     print(f"signature: {'valid' if sig_ok else 'invalid'}")
     print(f"issued: {'yes' if issued else 'no'}")
     print(f"revoked: {'yes' if revoked else 'no'}")
+    if tracking is not None:
+        print(f"tracking_id: {tracking.tracking_id}")
+        print(f"fingerprint: {tracking.fingerprint}")
+        print(f"tracking_status: {tracking.status}")
+    else:
+        print(f"fingerprint: {key_fingerprint(parsed.key)}")
 
     if parsed.version == "qos3":
         spec = tier_from_code(parsed.tier_code)
@@ -911,14 +1158,14 @@ def cmd_verify(args: argparse.Namespace) -> None:
     else:
         print("integrity: manifest not present")
 
-    ok = sig_ok and issued and not revoked
+    ok = sig_ok and issued and not revoked and not legacy_blocked
     if args.strict:
         ok = ok and meta_ok and integrity_ok
     raise SystemExit(0 if ok else 1)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     secret_v2 = key_secret_v2()
     secret_v3 = key_secret_v3()
 
@@ -940,11 +1187,15 @@ def cmd_list(args: argparse.Namespace) -> None:
             else:
                 spec = tier_from_feature_bits(parsed.feature_bits)
                 tier = spec.name if spec else "legacy-custom"
-            print(f"{key} [{key_status(db_lookup, revoked, key)}] tier={tier}")
+            tracking = tracking_lookup_by_key(args.tracking, key)
+            track_id = tracking.tracking_id if tracking else "unknown"
+            fp = tracking.fingerprint if tracking and tracking.fingerprint else key_fingerprint(key)
+            shown = key if args.reveal else mask_key(key)
+            print(f"{shown} [{key_status(db_lookup, revoked, key)}] tier={tier} tracking_id={track_id} fp={fp}")
 
 
 def cmd_revoke(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     secret_v2 = key_secret_v2()
     secret_v3 = key_secret_v3()
 
@@ -968,14 +1219,15 @@ def cmd_revoke(args: argparse.Namespace) -> None:
 
     revoked.add(key)
     write_revoked(args.revoked, sorted(revoked))
+    tracking_mark_status(args.tracking, {key}, "revoked")
     ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     append_audit(args.audit, [(ts, "REVOKE", key, args.actor, args.note or "")])
     seal_integrity(args)
-    print(f"revoked: {key}")
+    print(f"revoked: {mask_key(key)}")
 
 
 def cmd_revoke_all(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     secret_v2 = key_secret_v2()
     secret_v3 = key_secret_v3()
 
@@ -985,6 +1237,7 @@ def cmd_revoke_all(args: argparse.Namespace) -> None:
     revoked.update(db_keys)
 
     write_revoked(args.revoked, sorted(revoked))
+    tracking_mark_status(args.tracking, set(db_keys), "revoked")
     ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     append_audit(
         args.audit,
@@ -1001,7 +1254,7 @@ def cmd_revoke_all(args: argparse.Namespace) -> None:
 
 
 def cmd_unrevoke(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     secret_v2 = key_secret_v2()
     secret_v3 = key_secret_v3()
 
@@ -1020,10 +1273,68 @@ def cmd_unrevoke(args: argparse.Namespace) -> None:
         return
     revoked.remove(key)
     write_revoked(args.revoked, sorted(revoked))
+    tracking_mark_status(args.tracking, {key}, "issued")
     ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     append_audit(args.audit, [(ts, "UNREVOKE", key, args.actor, args.note or "")])
     seal_integrity(args)
-    print(f"unrevoked: {key}")
+    print(f"unrevoked: {mask_key(key)}")
+
+
+def cmd_deactivate_legacy(args: argparse.Namespace) -> None:
+    require_password(args.password, args.password_env)
+    secret_v2 = key_secret_v2()
+    secret_v3 = key_secret_v3()
+
+    db_keys = set(read_db(args.db, secret_v2, secret_v3))
+    revoked = set(read_revoked(args.revoked, secret_v2, secret_v3))
+
+    legacy_keys: set[str] = set()
+    for key in db_keys:
+        try:
+            parsed = parse_key(key)
+        except ValueError:
+            continue
+        if parsed.version in ("qos1", "qos2"):
+            legacy_keys.add(key)
+
+    if not legacy_keys:
+        print("deactivate-legacy: no qos1/qos2 keys found in issued database")
+        return
+
+    revoked.update(legacy_keys)
+    if args.purge:
+        db_keys -= legacy_keys
+
+    write_db(args.db, sorted(db_keys))
+    write_revoked(args.revoked, sorted(revoked))
+    tracking_mark_status(args.tracking, legacy_keys, "revoked_legacy")
+
+    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    note = f"legacy={len(legacy_keys)} purge={'yes' if args.purge else 'no'}"
+    append_audit(args.audit, [(ts, "DEACTIVATE_LEGACY", "*", args.actor, note)])
+    seal_integrity(args)
+    print(
+        "deactivate-legacy: "
+        f"legacy_keys={len(legacy_keys)} purge={'yes' if args.purge else 'no'} "
+        f"issued_now={len(db_keys)} revoked_now={len(revoked)}"
+    )
+
+
+def cmd_lookup(args: argparse.Namespace) -> None:
+    require_password(args.password, args.password_env)
+    rec = tracking_lookup_by_tracking_id(args.tracking, args.tracking_id)
+    if rec is None:
+        print(f"lookup: tracking id not found: {args.tracking_id}")
+        raise SystemExit(1)
+
+    shown = rec.key if args.reveal else mask_key(rec.key)
+    print(f"tracking_id: {rec.tracking_id}")
+    print(f"key: {shown}")
+    print(f"fingerprint: {rec.fingerprint or key_fingerprint(rec.key)}")
+    print(f"owner: {rec.owner or 'unknown'}")
+    print(f"tier: {rec.tier or 'unknown'}")
+    print(f"issued_at_utc: {rec.issued_at_utc or 'unknown'}")
+    print(f"status: {rec.status or 'unknown'}")
 
 
 def cmd_verify_store(args: argparse.Namespace) -> None:
@@ -1044,6 +1355,13 @@ def cmd_verify_store(args: argparse.Namespace) -> None:
     db_set = set(db_valid)
     for key in rv_valid:
         if key not in db_set:
+            try:
+                parsed = parse_key(key)
+            except ValueError:
+                issues.append(f"revoked key missing from db: {key}")
+                continue
+            if parsed.version in ("qos1", "qos2"):
+                continue
             issues.append(f"revoked key missing from db: {key}")
 
     integrity_ok, integrity_issues = verify_integrity_manifest(
@@ -1052,6 +1370,7 @@ def cmd_verify_store(args: argparse.Namespace) -> None:
         args.revoked,
         args.meta,
         args.audit,
+        args.tracking,
         integrity_secret(),
         require_manifest=args.require_manifest,
     )
@@ -1072,13 +1391,13 @@ def cmd_verify_store(args: argparse.Namespace) -> None:
 
 
 def cmd_seal_store(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     seal_integrity(args)
     print(f"sealed integrity manifest: {args.integrity}")
 
 
 def cmd_harden_store(args: argparse.Namespace) -> None:
-    require_password(args.password)
+    require_password(args.password, args.password_env)
     secret_v2 = key_secret_v2()
     secret_v3 = key_secret_v3()
 
@@ -1087,19 +1406,28 @@ def cmd_harden_store(args: argparse.Namespace) -> None:
     write_db(args.db, db_keys)
     write_revoked(args.revoked, revoked_keys)
 
-    for path in (args.meta, args.audit):
+    for path in (args.meta, args.audit, args.tracking):
         if path.exists():
             write_text_secure(path, read_text_secure(path))
 
     seal_integrity(args)
-    print("harden-store: encrypted db/revoked/meta/audit/integrity")
+    print("harden-store: encrypted db/revoked/meta/audit/tracking/integrity")
 
 
 def cmd_password_hash(args: argparse.Namespace) -> None:
     password = args.password
+    if password is None and args.password_env:
+        password = os.getenv(args.password_env)
     if password is None:
         password = getpass.getpass("New issuer password: ")
-    record = make_password_record(password, iterations=args.iterations)
+    record = make_password_record(
+        password,
+        algo=args.algo,
+        iterations=args.iterations,
+        scrypt_n=args.scrypt_n,
+        scrypt_r=args.scrypt_r,
+        scrypt_p=args.scrypt_p,
+    )
     out_path = args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(record + "\n", encoding="utf-8")
@@ -1122,6 +1450,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--meta", type=Path, default=DEFAULT_META, help=f"metadata csv path (default: {DEFAULT_META})")
     p.add_argument("--audit", type=Path, default=DEFAULT_AUDIT, help=f"audit csv path (default: {DEFAULT_AUDIT})")
+    p.add_argument("--tracking", type=Path, default=DEFAULT_TRACKING, help=f"tracking csv path (default: {DEFAULT_TRACKING})")
+    p.add_argument(
+        "--password-env",
+        default=None,
+        help="environment variable to read issuer password from (avoids password in argv)",
+    )
     p.add_argument(
         "--integrity",
         type=Path,
@@ -1149,15 +1483,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow issuing deprecated qos1/qos2 keys",
     )
     issue.add_argument("--password", help="issuer password (optional; prompt if omitted)")
+    issue.add_argument("--show-keys", action="store_true", help="print full keys instead of masked output")
     issue.set_defaults(func=cmd_issue)
 
     verify = sub.add_parser("verify", help="verify signature + issuance + revocation + metadata")
     verify.add_argument("--key", required=True, help="license key")
     verify.add_argument("--strict", action="store_true", help="fail if metadata/integrity checks fail")
+    verify.add_argument("--reveal", action="store_true", help="show full key in output")
     verify.set_defaults(func=cmd_verify)
 
     list_cmd = sub.add_parser("list", help="list issued/revoked keys (password required)")
     list_cmd.add_argument("--show", action="store_true", help="print all issued keys")
+    list_cmd.add_argument("--reveal", action="store_true", help="show full keys")
     list_cmd.add_argument("--password", help="issuer password (optional; prompt if omitted)")
     list_cmd.set_defaults(func=cmd_list)
 
@@ -1181,6 +1518,18 @@ def build_parser() -> argparse.ArgumentParser:
     unrevoke.add_argument("--password", help="issuer password (optional; prompt if omitted)")
     unrevoke.set_defaults(func=cmd_unrevoke)
 
+    deactivate_legacy = sub.add_parser("deactivate-legacy", help="revoke all qos1/qos2 keys and optionally purge")
+    deactivate_legacy.add_argument("--purge", action="store_true", help="remove qos1/qos2 keys from issued db")
+    deactivate_legacy.add_argument("--actor", default="admin", help="operator name for audit log")
+    deactivate_legacy.add_argument("--password", help="issuer password (optional; prompt if omitted)")
+    deactivate_legacy.set_defaults(func=cmd_deactivate_legacy)
+
+    lookup = sub.add_parser("lookup", help="lookup license by tracking id (password required)")
+    lookup.add_argument("--tracking-id", required=True, help="tracking id (QTK-...)")
+    lookup.add_argument("--reveal", action="store_true", help="show full key")
+    lookup.add_argument("--password", help="issuer password (optional; prompt if omitted)")
+    lookup.set_defaults(func=cmd_lookup)
+
     verify_store = sub.add_parser("verify-store", help="verify db/revocation files + integrity manifest")
     verify_store.add_argument("--require-manifest", action="store_true", help="fail if integrity manifest is missing")
     verify_store.set_defaults(func=cmd_verify_store)
@@ -1198,7 +1547,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pwhash = sub.add_parser("password-hash", help="generate QOS_ISSUER_ADMIN_HASH value")
     pwhash.add_argument("--password", help="password (optional; prompt if omitted)")
+    pwhash.add_argument("--algo", choices=["scrypt", "pbkdf2"], default="scrypt")
     pwhash.add_argument("--iterations", type=int, default=DEFAULT_ADMIN_ITERATIONS)
+    pwhash.add_argument("--scrypt-n", type=int, default=DEFAULT_ADMIN_SCRYPT_N)
+    pwhash.add_argument("--scrypt-r", type=int, default=DEFAULT_ADMIN_SCRYPT_R)
+    pwhash.add_argument("--scrypt-p", type=int, default=DEFAULT_ADMIN_SCRYPT_P)
     pwhash.add_argument(
         "--out",
         type=Path,
@@ -1273,10 +1626,12 @@ def interactive_args() -> list[str] | None:
     print("  4) revoke")
     print("  5) revoke-all")
     print("  6) unrevoke")
-    print("  7) verify-store")
-    print("  8) seal-store")
-    print("  9) harden-store")
-    print("  10) password-hash")
+    print("  7) deactivate-legacy")
+    print("  8) lookup")
+    print("  9) verify-store")
+    print("  10) seal-store")
+    print("  11) harden-store")
+    print("  12) password-hash")
     print("  q) quit")
     while True:
         choice = prompt_text("select command", required=True).lower()
@@ -1338,19 +1693,29 @@ def interactive_args() -> list[str] | None:
             if note:
                 out.extend(["--note", note])
             return out
-        if choice in ("7", "verify-store"):
+        if choice in ("7", "deactivate-legacy"):
+            actor = prompt_text("actor", "admin", required=True)
+            purge = prompt_yes_no("purge legacy from issued db", default=True)
+            out = ["deactivate-legacy", "--actor", actor]
+            if purge:
+                out.append("--purge")
+            return out
+        if choice in ("8", "lookup"):
+            tracking_id = prompt_text("tracking id", required=True)
+            return ["lookup", "--tracking-id", tracking_id]
+        if choice in ("9", "verify-store"):
             require_manifest = prompt_yes_no("require integrity manifest", default=True)
             out = ["verify-store"]
             if require_manifest:
                 out.append("--require-manifest")
             return out
-        if choice in ("8", "seal-store"):
+        if choice in ("10", "seal-store"):
             return ["seal-store"]
-        if choice in ("9", "harden-store"):
+        if choice in ("11", "harden-store"):
             return ["harden-store"]
-        if choice in ("10", "password-hash"):
+        if choice in ("12", "password-hash"):
             iterations = prompt_int("iterations", DEFAULT_ADMIN_ITERATIONS, 100000, 2000000)
-            return ["password-hash", "--iterations", str(iterations)]
+            return ["password-hash", "--algo", "scrypt", "--iterations", str(iterations)]
         print("invalid selection")
 
 
