@@ -1118,7 +1118,15 @@ static void fsck_append(char *out, size_t out_len, const char *text) {
     if (!out || out_len == 0 || !text) {
         return;
     }
-    strncat(out, text, out_len - strlen(out) - 1);
+    size_t used = 0;
+    while (used < out_len && out[used] != '\0') {
+        used++;
+    }
+    if (used >= out_len - 1u) {
+        out[out_len - 1u] = '\0';
+        return;
+    }
+    strncat(out, text, out_len - used - 1u);
 }
 
 static void fsck_append_u32(char *out, size_t out_len, uint32_t value) {

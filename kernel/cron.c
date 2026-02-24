@@ -93,7 +93,11 @@ static int parse_u32_dec(const char *text, uint32_t *out) {
         if (*p < '0' || *p > '9') {
             return 0;
         }
-        value = value * 10u + (uint32_t)(*p - '0');
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (0xFFFFFFFFu - digit) / 10u) {
+            return 0;
+        }
+        value = value * 10u + digit;
     }
     *out = value;
     return 1;
@@ -103,7 +107,15 @@ static void append_text(char *out, size_t out_len, const char *text) {
     if (!out || out_len == 0 || !text) {
         return;
     }
-    strncat(out, text, out_len - strlen(out) - 1);
+    size_t used = 0;
+    while (used < out_len && out[used] != '\0') {
+        used++;
+    }
+    if (used >= out_len - 1u) {
+        out[out_len - 1u] = '\0';
+        return;
+    }
+    strncat(out, text, out_len - used - 1u);
 }
 
 static void append_u32(char *out, size_t out_len, uint32_t value) {

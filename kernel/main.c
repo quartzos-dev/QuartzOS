@@ -151,7 +151,11 @@ static int parse_u32_dec(const char *s, uint32_t *out) {
         if (*p < '0' || *p > '9') {
             return 0;
         }
-        value = value * 10u + (uint32_t)(*p - '0');
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (0xFFFFFFFFu - digit) / 10u) {
+            return 0;
+        }
+        value = value * 10u + digit;
     }
     *out = value;
     return 1;
@@ -261,22 +265,17 @@ static void boot_splash(const char *phase, uint32_t step, uint32_t total) {
     fb_present();
 }
 
-static void halt_unlicensed_boot(void) {
-    audit_log("LICENSE_BOOT_BLOCK", "no-verified-license");
-    kprintf("LICENSE: boot blocked. verified consumer monthly license required.\n");
+static void show_unlicensed_boot_notice(void) {
+    audit_log("LICENSE_BOOT_LOCKMODE", "no-verified-license");
+    kprintf("LICENSE: lock mode active. verified consumer monthly license required.\n");
 
     fb_clear(0x00101826);
-    fb_draw_text(36, 46, "QuartzOS access denied", 0x00f2f8ff, 0x00101826);
+    fb_draw_text(36, 46, "QuartzOS license lock", 0x00f2f8ff, 0x00101826);
     fb_draw_text(36, 68, "No verified active license found.", 0x00e2c8b0, 0x00101826);
     fb_draw_text(36, 86, "Minimum required: Consumer monthly license (QOS3).", 0x00d7bca6, 0x00101826);
-    fb_draw_text(36, 112, "Activate a valid license using QuartzOS-license-issuer,", 0x00b8cbe0, 0x00101826);
-    fb_draw_text(36, 128, "then reboot QuartzOS.", 0x00b8cbe0, 0x00101826);
+    fb_draw_text(36, 112, "Use shell commands: license terms / accept / activate / unlock", 0x00b8cbe0, 0x00101826);
+    fb_draw_text(36, 128, "GUI and network stay locked until verification passes.", 0x00b8cbe0, 0x00101826);
     fb_present();
-
-    interrupts_enable();
-    for (;;) {
-        __asm__ volatile("hlt");
-    }
 }
 
 static const boot_profile_t *select_boot_profile(const char *name) {
@@ -516,7 +515,7 @@ void kernel_main(void) {
     if (!license_ready) {
         kprintf("LICENSE: enforcement lock active (requires verified consumer monthly license)\n");
         audit_log("LICENSE_BOOT_LOCK", "minimum-consumer-monthly");
-        halt_unlicensed_boot();
+        show_unlicensed_boot_notice();
     }
     kprintf("SECURITY: mode=%s failsafe(intrusion=%s integrity=%s)\n",
             security_mode_name(security_mode()),
@@ -580,7 +579,13 @@ void kernel_main(void) {
         }
         (void)task_set_priority(shell_id, 24);
         (void)task_set_realtime(shell_id, true);
-        kprintf("BOOT: profile=%s\n", license_ready ? "security-lock" : "license-lock");
+        const char *lock_profile = "license+security-lock";
+        if (license_ready && !security_ready) {
+            lock_profile = "security-lock";
+        } else if (!license_ready && security_ready) {
+            lock_profile = "license-lock";
+        }
+        kprintf("BOOT: profile=%s\n", lock_profile);
         kprintf("GUI: desktop service disabled in lock mode\n");
         kprintf("LICENSE: unlock with: license terms -> license accept -> license activate <QOS3-key> -> license unlock\n");
         if (!security_ready) {

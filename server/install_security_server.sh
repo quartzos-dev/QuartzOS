@@ -42,8 +42,9 @@ QOS_SECURITY_LICENSE_PORT=9444
 QOS_SECURITY_DATA_DIR=/opt/quartzos-security/data/current
 QOS_SECURITY_RELOAD_SECONDS=2.5
 QOS_SECURITY_REQUIRE_PIN=1
-# Comma-separated client IP allowlist. Empty means allow all sources.
+# Comma-separated client allowlist entries (IPv4, IPv6, or CIDR). Empty means allow all sources.
 QOS_SECURITY_ALLOWED_CLIENTS=
+QOS_SECURITY_MAX_CLIENTS=128
 # Must match the QuartzOS build key inputs used for the kernel image.
 QOS_BUILD_ROOT_SECRET=QuartzOS-BuildRoot-2026
 QOS_BUILD_SALT=quartzos-build-v1

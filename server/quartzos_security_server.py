@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import signal
@@ -27,9 +28,11 @@ SECURE_KID_CURRENT = 0x01
 SECURE_KID_PREVIOUS = 0x02
 SECURE_NONCE_BYTES = 8
 SECURE_TAG_BYTES = 32
+DEFAULT_MAX_CLIENTS = 128
 
 POLICY_DEVELOPMENT_ONLY = 0x01
 POLICY_SUBSCRIPTION = 0x40
+NetworkType = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,16 @@ def parse_port(text: str, fallback: int) -> int:
     if value <= 0 or value > 65535:
         return fallback
     return value
+
+
+def canonical_ip_text(text: str) -> Optional[str]:
+    try:
+        addr = ipaddress.ip_address(text.strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return str(addr)
 
 
 def parse_u32_hex(text: str) -> int:
@@ -247,6 +260,27 @@ def is_hex(text: str, expected_len: int) -> bool:
     except ValueError:
         return False
     return True
+
+
+def parse_allowed_clients(items: Iterable[str], logger: logging.Logger) -> Tuple[Set[str], Tuple[NetworkType, ...]]:
+    allowed_ips: Set[str] = set()
+    allowed_nets: list[NetworkType] = []
+    for raw in items:
+        item = raw.strip()
+        if not item:
+            continue
+        if "/" in item:
+            try:
+                allowed_nets.append(ipaddress.ip_network(item, strict=False))
+            except ValueError:
+                logger.warning("ignoring invalid allowlist network: %s", item)
+            continue
+        canonical = canonical_ip_text(item)
+        if canonical is None:
+            logger.warning("ignoring invalid allowlist ip: %s", item)
+            continue
+        allowed_ips.add(canonical)
+    return allowed_ips, tuple(allowed_nets)
 
 
 class SecurityDataStore:
@@ -463,24 +497,41 @@ class QuartzSecurityServer:
         av_port: int,
         license_port: int,
         require_pin: bool,
-        allowed_clients: Set[str],
+        allowed_client_ips: Set[str],
+        allowed_client_nets: Tuple[NetworkType, ...],
         store: SecurityDataStore,
         reload_interval: float,
+        max_clients: int,
     ) -> None:
         self.bind_ip = bind_ip
         self.av_port = av_port
         self.license_port = license_port
         self.require_pin = require_pin
-        self.allowed_clients = allowed_clients
+        self.allowed_client_ips = allowed_client_ips
+        self.allowed_client_nets = allowed_client_nets
         self.store = store
         self.reload_interval = reload_interval
         self.stop_event = threading.Event()
+        self.max_clients = max(1, max_clients)
+        self._client_slots = threading.BoundedSemaphore(self.max_clients)
         self.logger = logging.getLogger("quartzos-security")
 
     def _client_allowed(self, ip: str) -> bool:
-        if not self.allowed_clients:
+        if not self.allowed_client_ips and not self.allowed_client_nets:
             return True
-        return ip in self.allowed_clients
+        canonical = canonical_ip_text(ip)
+        if canonical is None:
+            return False
+        if canonical in self.allowed_client_ips:
+            return True
+        try:
+            addr = ipaddress.ip_address(canonical)
+        except ValueError:
+            return False
+        for net in self.allowed_client_nets:
+            if addr in net:
+                return True
+        return False
 
     def _response_ok(self, channel: str, nonce_hex: str, payload: str) -> str:
         mac = self.store.pin_hex(channel, nonce_hex.lower(), payload)
@@ -594,6 +645,12 @@ class QuartzSecurityServer:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _handle_client_slot(self, conn: socket.socket, addr: Tuple[str, int], role: str) -> None:
+        try:
+            self._handle_client(conn, addr, role)
+        finally:
+            self._client_slots.release()
+
     def _serve(self, role: str, port: int) -> None:
         family = socket.AF_INET6 if ":" in self.bind_ip else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
@@ -610,7 +667,18 @@ class QuartzSecurityServer:
                 continue
             except OSError:
                 break
-            t = threading.Thread(target=self._handle_client, args=(conn, addr, role), daemon=True)
+            if not self._client_slots.acquire(blocking=False):
+                self.logger.warning("%s request dropped from %s:%d (busy)", role, addr[0], addr[1])
+                try:
+                    conn.sendall(b"DENY reason=busy\n")
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            t = threading.Thread(target=self._handle_client_slot, args=(conn, addr, role), daemon=True)
             t.start()
 
         try:
@@ -685,6 +753,12 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("QOS_SECURITY_LOG_LEVEL", "INFO"),
         help="logging level",
     )
+    parser.add_argument(
+        "--max-clients",
+        type=int,
+        default=parse_port(os.getenv("QOS_SECURITY_MAX_CLIENTS", str(DEFAULT_MAX_CLIENTS)), DEFAULT_MAX_CLIENTS),
+        help="maximum concurrent client handlers",
+    )
     return parser.parse_args()
 
 
@@ -700,13 +774,27 @@ def main() -> int:
     root_secret = os.getenv("QOS_BUILD_ROOT_SECRET", DEFAULT_BUILD_ROOT_SECRET).encode("utf-8")
     build_salt = os.getenv("QOS_BUILD_SALT", DEFAULT_BUILD_SALT)
 
-    allowed = {item.strip() for item in args.allowed_client if item.strip()}
+    args.av_port = parse_port(str(args.av_port), 9443)
+    args.license_port = parse_port(str(args.license_port), 9444)
+    if args.av_port == args.license_port:
+        logger.error("invalid config: av and license ports must be different")
+        return 2
+
+    bind_text = str(args.bind).strip()
+    if bind_text not in {"0.0.0.0", "::"}:
+        if canonical_ip_text(bind_text) is None:
+            logger.error("invalid bind address: %s", bind_text)
+            return 2
+    args.bind = bind_text
+
+    allowed_specs = {item.strip() for item in args.allowed_client if item.strip()}
     env_allowed = os.getenv("QOS_SECURITY_ALLOWED_CLIENTS", "")
     if env_allowed.strip():
         for item in env_allowed.split(","):
             item = item.strip()
             if item:
-                allowed.add(item)
+                allowed_specs.add(item)
+    allowed_ips, allowed_nets = parse_allowed_clients(sorted(allowed_specs), logger)
 
     store = SecurityDataStore(Path(args.data_dir), root_secret, build_salt, logger)
     server = QuartzSecurityServer(
@@ -714,9 +802,11 @@ def main() -> int:
         av_port=args.av_port,
         license_port=args.license_port,
         require_pin=args.require_pin,
-        allowed_clients=allowed,
+        allowed_client_ips=allowed_ips,
+        allowed_client_nets=allowed_nets,
         store=store,
         reload_interval=max(0.5, args.reload_seconds),
+        max_clients=max(1, args.max_clients),
     )
 
     def _signal_handler(signum: int, _frame: object) -> None:
@@ -727,13 +817,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, _signal_handler)
 
     logger.info(
-        "starting: bind=%s av_port=%d license_port=%d data_dir=%s require_pin=%s allowlist=%d",
+        "starting: bind=%s av_port=%d license_port=%d data_dir=%s require_pin=%s allowlist=%d allowlist_nets=%d max_clients=%d",
         args.bind,
         args.av_port,
         args.license_port,
         args.data_dir,
         "yes" if args.require_pin else "no",
-        len(allowed),
+        len(allowed_ips),
+        len(allowed_nets),
+        max(1, args.max_clients),
     )
     server.run()
     logger.info("stopped")

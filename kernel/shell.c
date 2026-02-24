@@ -78,7 +78,11 @@ static int parse_u32_text(const char *s, uint32_t *out) {
         if (*p < '0' || *p > '9') {
             return 0;
         }
-        value = value * 10u + (uint32_t)(*p - '0');
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (0xFFFFFFFFu - digit) / 10u) {
+            return 0;
+        }
+        value = value * 10u + digit;
     }
     *out = value;
     return 1;
@@ -93,7 +97,11 @@ static int parse_u64_text(const char *s, uint64_t *out) {
         if (*p < '0' || *p > '9') {
             return 0;
         }
-        value = value * 10u + (uint64_t)(*p - '0');
+        uint64_t digit = (uint64_t)(*p - '0');
+        if (value > (0xFFFFFFFFFFFFFFFFull - digit) / 10ull) {
+            return 0;
+        }
+        value = value * 10ull + digit;
     }
     *out = value;
     return 1;
@@ -111,14 +119,27 @@ static int parse_i32_text(const char *s, int *out) {
     if (!*s) {
         return 0;
     }
-    int value = 0;
+    uint32_t value = 0;
+    uint32_t limit = (sign > 0) ? 2147483647u : 2147483648u;
     for (const char *p = s; *p; p++) {
         if (*p < '0' || *p > '9') {
             return 0;
         }
-        value = value * 10 + (*p - '0');
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (limit - digit) / 10u) {
+            return 0;
+        }
+        value = value * 10u + digit;
     }
-    *out = value * sign;
+    if (sign > 0) {
+        *out = (int)value;
+        return 1;
+    }
+    if (value == 2147483648u) {
+        *out = (-2147483647 - 1);
+    } else {
+        *out = -(int)value;
+    }
     return 1;
 }
 

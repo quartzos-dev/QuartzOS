@@ -26,10 +26,29 @@ static int parse_u32_dec(const char *text, uint32_t *out_value) {
         if (*p < '0' || *p > '9') {
             return 0;
         }
-        value = value * 10u + (uint32_t)(*p - '0');
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (0xFFFFFFFFu - digit) / 10u) {
+            return 0;
+        }
+        value = value * 10u + digit;
     }
     *out_value = value;
     return 1;
+}
+
+static void append_text(char *out, size_t out_len, const char *text) {
+    if (!out || out_len == 0 || !text) {
+        return;
+    }
+    size_t used = 0;
+    while (used < out_len && out[used] != '\0') {
+        used++;
+    }
+    if (used >= out_len - 1u) {
+        out[out_len - 1u] = '\0';
+        return;
+    }
+    strncat(out, text, out_len - used - 1u);
 }
 
 static config_item_t *find_item(const char *key) {
@@ -120,10 +139,10 @@ bool config_save(void) {
         if (!g_items[i].used) {
             continue;
         }
-        strncat(blob, g_items[i].key, sizeof(blob) - strlen(blob) - 1);
-        strncat(blob, "=", sizeof(blob) - strlen(blob) - 1);
-        strncat(blob, g_items[i].value, sizeof(blob) - strlen(blob) - 1);
-        strncat(blob, "\n", sizeof(blob) - strlen(blob) - 1);
+        append_text(blob, sizeof(blob), g_items[i].key);
+        append_text(blob, sizeof(blob), "=");
+        append_text(blob, sizeof(blob), g_items[i].value);
+        append_text(blob, sizeof(blob), "\n");
     }
 
     if (!secure_store_write_text(CONFIG_PATH, blob, strlen(blob), sfs_persistence_enabled())) {
@@ -192,10 +211,10 @@ size_t config_dump(char *out, size_t out_len) {
         if (!g_items[i].used) {
             continue;
         }
-        strncat(out, g_items[i].key, out_len - strlen(out) - 1);
-        strncat(out, "=", out_len - strlen(out) - 1);
-        strncat(out, g_items[i].value, out_len - strlen(out) - 1);
-        strncat(out, "\n", out_len - strlen(out) - 1);
+        append_text(out, out_len, g_items[i].key);
+        append_text(out, out_len, "=");
+        append_text(out, out_len, g_items[i].value);
+        append_text(out, out_len, "\n");
     }
     return strlen(out);
 }

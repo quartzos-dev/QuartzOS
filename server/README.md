@@ -10,6 +10,8 @@ This folder contains the server-side implementation used by QuartzOS kernel secu
     - license verification checks on port `9444`
   - validates kernel request HMAC pin (`QOS_KEY_SECURITY_SERVER_PIN` derivation)
   - verifies license signatures and enforces minimum `QOS3` monthly/subscription tier
+  - supports strict client allowlist entries (IP and CIDR)
+  - enforces concurrent connection cap (`QOS_SECURITY_MAX_CLIENTS`, default `128`)
 
 - `install_security_server.sh`
   - installs and hardens the daemon as a `systemd` service:
