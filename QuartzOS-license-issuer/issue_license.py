@@ -35,8 +35,14 @@ DEFAULT_HMAC_SECRET_V2 = "QuartzOS-Licensing-HMAC-Key-V2-2026"
 DEFAULT_HMAC_SECRET_V3 = "QuartzOS-Licensing-HMAC-Key-V3-2026"
 DEFAULT_INTEGRITY_SECRET = "QuartzOS-License-Store-Integrity-V1-2026"
 DEFAULT_FILE_ENC_SECRET = "QuartzOS-SecureStore-ENC-V1-2026"
+DEFAULT_FILE_ENC_SECRET_PREV = "QuartzOS-SecureStore-ENC-V1-2026"
+DEFAULT_BUILD_ROOT_SECRET = "QuartzOS-BuildRoot-2026"
+DEFAULT_BUILD_SALT = "quartzos-build-v1"
 DEFAULT_TRACKING_SECRET = "QuartzOS-License-Tracking-V1-2026"
 SECURE_PREFIX = "QENC1|"
+SECURE_VERSION_V2 = "v2"
+SECURE_KID_CURRENT = 0x01
+SECURE_KID_PREVIOUS = 0x02
 SECURE_NONCE_BYTES = 8
 SECURE_TAG_BYTES = 32
 ALLOW_LEGACY_ISSUE_DEFAULT = False
@@ -92,6 +98,14 @@ class TrackingRecord:
     tier: str
     issued_at_utc: str
     status: str
+
+
+@dataclass(frozen=True)
+class FileKeyPair:
+    kid: int
+    enc_key: bytes
+    mac_key: bytes
+    legacy_raw: bytes
 
 
 TIERS: dict[str, TierSpec] = {
@@ -754,8 +768,43 @@ def integrity_secret() -> str:
     return os.getenv("QOS_ISSUER_INTEGRITY_SECRET", DEFAULT_INTEGRITY_SECRET)
 
 
-def file_enc_secret() -> bytes:
-    return os.getenv("QOS_ISSUER_FILE_ENC_KEY", DEFAULT_FILE_ENC_SECRET).encode("utf-8")
+def _derive_bytes(root_secret: bytes, salt: str, label: str, size: int = 32) -> bytes:
+    out = bytearray()
+    counter = 0
+    while len(out) < size:
+        msg = f"{salt}|{label}|{counter}".encode("utf-8")
+        out.extend(hmac.new(root_secret, msg, hashlib.sha256).digest())
+        counter += 1
+    return bytes(out[:size])
+
+
+def _build_root_secret() -> bytes:
+    return os.getenv("QOS_BUILD_ROOT_SECRET", DEFAULT_BUILD_ROOT_SECRET).encode("utf-8")
+
+
+def _build_salt() -> str:
+    return os.getenv("QOS_BUILD_SALT", DEFAULT_BUILD_SALT)
+
+
+def _secure_key_pairs() -> list[FileKeyPair]:
+    root_secret = _build_root_secret()
+    build_salt = _build_salt()
+    current_legacy = os.getenv("QOS_ISSUER_FILE_ENC_KEY", DEFAULT_FILE_ENC_SECRET).encode("utf-8")
+    prev_legacy = os.getenv("QOS_ISSUER_FILE_ENC_KEY_PREV", DEFAULT_FILE_ENC_SECRET_PREV).encode("utf-8")
+    return [
+        FileKeyPair(
+            kid=SECURE_KID_CURRENT,
+            enc_key=_derive_bytes(root_secret, build_salt, "securestore.enc"),
+            mac_key=_derive_bytes(root_secret, build_salt, "securestore.mac"),
+            legacy_raw=current_legacy,
+        ),
+        FileKeyPair(
+            kid=SECURE_KID_PREVIOUS,
+            enc_key=_derive_bytes(root_secret, build_salt, "securestore.enc.prev"),
+            mac_key=_derive_bytes(root_secret, build_salt, "securestore.mac.prev"),
+            legacy_raw=prev_legacy,
+        ),
+    ]
 
 
 def _stream_xor(data: bytes, nonce: bytes, key: bytes) -> bytes:
@@ -772,13 +821,25 @@ def _stream_xor(data: bytes, nonce: bytes, key: bytes) -> bytes:
     return bytes(out)
 
 
+def _tag_v1_legacy(mac_key: bytes, nonce: bytes, cipher: bytes) -> bytes:
+    return hmac.new(mac_key, SECURE_PREFIX.encode("ascii") + nonce + cipher, hashlib.sha256).digest()
+
+
+def _tag_v2(mac_key: bytes, kid: int, nonce: bytes, cipher: bytes) -> bytes:
+    aad = SECURE_PREFIX.encode("ascii") + f"{SECURE_VERSION_V2}|".encode("ascii") + bytes([kid]) + len(cipher).to_bytes(4, "little")
+    return hmac.new(mac_key, aad + nonce + cipher, hashlib.sha256).digest()
+
+
 def encrypt_text_secure(text: str) -> str:
-    key = file_enc_secret()
+    pair = _secure_key_pairs()[0]
     nonce = secrets.token_bytes(SECURE_NONCE_BYTES)
     plain = text.encode("utf-8")
-    cipher = _stream_xor(plain, nonce, key)
-    tag = hmac.new(key, SECURE_PREFIX.encode("ascii") + nonce + cipher, hashlib.sha256).hexdigest().upper()
-    return f"{SECURE_PREFIX}{nonce.hex().upper()}|{cipher.hex().upper()}|{tag}\n"
+    cipher = _stream_xor(plain, nonce, pair.enc_key)
+    tag = _tag_v2(pair.mac_key, pair.kid, nonce, cipher).hex().upper()
+    return (
+        f"{SECURE_PREFIX}{SECURE_VERSION_V2}|{pair.kid:02X}|"
+        f"{nonce.hex().upper()}|{cipher.hex().upper()}|{tag}\n"
+    )
 
 
 def decrypt_text_secure(raw: str) -> str:
@@ -786,27 +847,57 @@ def decrypt_text_secure(raw: str) -> str:
     if not text.startswith(SECURE_PREFIX):
         return raw
     parts = text.split("|")
-    if len(parts) != 4:
-        raise ValueError("invalid encrypted file format")
-    _, nonce_hex, cipher_hex, tag_hex = parts
-    if len(nonce_hex) != SECURE_NONCE_BYTES * 2:
-        raise ValueError("invalid encrypted nonce length")
-    if len(tag_hex) != SECURE_TAG_BYTES * 2:
-        raise ValueError("invalid encrypted tag length")
-    if len(cipher_hex) % 2 != 0:
-        raise ValueError("invalid encrypted payload length")
+    pairs = _secure_key_pairs()
 
-    nonce = bytes.fromhex(nonce_hex)
-    cipher = bytes.fromhex(cipher_hex)
-    file_tag = bytes.fromhex(tag_hex)
-    key = file_enc_secret()
+    if len(parts) == 6 and parts[1].lower() == SECURE_VERSION_V2:
+        _, _, kid_hex, nonce_hex, cipher_hex, tag_hex = parts
+        if len(kid_hex) != 2:
+            raise ValueError("invalid encrypted key id length")
+        if len(nonce_hex) != SECURE_NONCE_BYTES * 2:
+            raise ValueError("invalid encrypted nonce length")
+        if len(tag_hex) != SECURE_TAG_BYTES * 2:
+            raise ValueError("invalid encrypted tag length")
+        if len(cipher_hex) % 2 != 0:
+            raise ValueError("invalid encrypted payload length")
 
-    expected = hmac.new(key, SECURE_PREFIX.encode("ascii") + nonce + cipher, hashlib.sha256).digest()
-    if not hmac.compare_digest(file_tag, expected):
-        raise ValueError("encrypted file tag mismatch")
+        try:
+            kid = int(kid_hex, 16)
+            nonce = bytes.fromhex(nonce_hex)
+            cipher = bytes.fromhex(cipher_hex)
+            file_tag = bytes.fromhex(tag_hex)
+        except ValueError as exc:
+            raise ValueError("invalid encrypted hex payload") from exc
 
-    plain = _stream_xor(cipher, nonce, key)
-    return plain.decode("utf-8")
+        selected = [pair for pair in pairs if pair.kid == kid]
+        if not selected:
+            raise ValueError("unknown encrypted key id")
+        pair = selected[0]
+        expected = _tag_v2(pair.mac_key, pair.kid, nonce, cipher)
+        if not hmac.compare_digest(file_tag, expected):
+            raise ValueError("encrypted file tag mismatch")
+        plain = _stream_xor(cipher, nonce, pair.enc_key)
+        return plain.decode("utf-8")
+
+    if len(parts) == 4:
+        _, nonce_hex, cipher_hex, tag_hex = parts
+        if len(nonce_hex) != SECURE_NONCE_BYTES * 2:
+            raise ValueError("invalid encrypted nonce length")
+        if len(tag_hex) != SECURE_TAG_BYTES * 2:
+            raise ValueError("invalid encrypted tag length")
+        if len(cipher_hex) % 2 != 0:
+            raise ValueError("invalid encrypted payload length")
+        nonce = bytes.fromhex(nonce_hex)
+        cipher = bytes.fromhex(cipher_hex)
+        file_tag = bytes.fromhex(tag_hex)
+        for pair in pairs:
+            expected = _tag_v1_legacy(pair.legacy_raw, nonce, cipher)
+            if not hmac.compare_digest(file_tag, expected):
+                continue
+            plain = _stream_xor(cipher, nonce, pair.legacy_raw)
+            return plain.decode("utf-8")
+        raise ValueError("encrypted legacy file tag mismatch")
+
+    raise ValueError("invalid encrypted file format")
 
 
 def read_text_secure(path: Path) -> str:

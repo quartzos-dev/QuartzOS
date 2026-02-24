@@ -18,7 +18,8 @@ typedef enum license_error {
     LICENSE_ERR_LEGACY_DISABLED = 7,
     LICENSE_ERR_MINIMUM_TIER = 8,
     LICENSE_ERR_SERVER_UNREACHABLE = 9,
-    LICENSE_ERR_SERVER_REJECTED = 10
+    LICENSE_ERR_SERVER_REJECTED = 10,
+    LICENSE_ERR_HARDWARE_MISMATCH = 11
 } license_error_t;
 
 void license_init(void);

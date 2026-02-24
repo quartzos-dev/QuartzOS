@@ -287,7 +287,9 @@ filesystem/    custom SFS
 gui/           desktop + window manager
 apps/          userspace app(s)
 assets/        rootfs seed assets (including license database)
+assets/config/ persisted system config seed (includes protected server endpoint keys)
 QuartzOS-license-issuer/ license issuer CLI + macOS app wrapper
+server/        server-side security verification daemon + installer
 lib/           freestanding libc subset
 tools/         build helpers (rootfs builder, qemu runner)
 include/       headers
@@ -376,6 +378,49 @@ sudo dd if=build/quartzos.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 (Replace `/dev/sdX` with your USB device.)
+
+### Secure SMB Access From macOS (IP-Based)
+
+Use the hardened helper to mount server files by SMB IP without weakening defaults:
+
+```bash
+chmod +x tools/macos_secure_smb.sh
+tools/macos_secure_smb.sh mount --ip 10.0.2.2 --share quartz --user qian
+```
+
+Unmount:
+
+```bash
+tools/macos_secure_smb.sh unmount --mount-point /Volumes/quartz
+```
+
+What this helper enforces by default:
+- IP-only target (no DNS hostname).
+- Private IPv4 only unless you explicitly add `--allow-public-ip`.
+- Session/share encryption required (`sessionencrypt`, `shareencrypt`).
+- Read-only mount unless you add `--writable`.
+- Writes per-server hardening config to `~/Library/Preferences/nsmb.conf`.
+
+### Security Verification Server Deployment
+
+QuartzOS kernel security + license checks use a dedicated verification server endpoint
+configured in `/etc/system.cfg`:
+
+- `security.server.ip`
+- `security.server.av_port`
+- `security.server.license_port`
+
+Deploy/update the server daemon and upload active manifest/license datasets:
+
+```bash
+cd /Users/qian/Music/OS
+./tools/deploy_security_server_bundle.sh root@46.16.131.231
+```
+
+Server-side components live in:
+
+- `/Users/qian/Music/OS/server/quartzos_security_server.py`
+- `/Users/qian/Music/OS/server/install_security_server.sh`
 
 ## Notes
 

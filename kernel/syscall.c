@@ -1,4 +1,5 @@
 #include <kernel/console.h>
+#include <kernel/cpu_hardening.h>
 #include <kernel/security.h>
 #include <kernel/syscall.h>
 #include <lib/string.h>
@@ -28,7 +29,9 @@ uint64_t syscall_handle(uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2
             if (!tmp) {
                 return (uint64_t)-1;
             }
+            cpu_user_access_begin();
             memcpy(tmp, (const void *)(uintptr_t)arg0, (size_t)arg1);
+            cpu_user_access_end();
             console_write_len(tmp, (size_t)arg1);
             kfree(tmp);
             return arg1;

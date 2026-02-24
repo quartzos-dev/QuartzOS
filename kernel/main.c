@@ -16,6 +16,7 @@
 #include <kernel/interrupts.h>
 #include <kernel/limine.h>
 #include <kernel/audit.h>
+#include <kernel/cpu_hardening.h>
 #include <kernel/license.h>
 #include <kernel/log.h>
 #include <kernel/mp.h>
@@ -23,6 +24,7 @@
 #include <kernel/security.h>
 #include <kernel/shell.h>
 #include <kernel/slog.h>
+#include <kernel/stack_protector.h>
 #include <kernel/service.h>
 #include <kernel/trace.h>
 #include <lib/string.h>
@@ -411,6 +413,11 @@ void kernel_main(void) {
     pic_unmask_irq(12);
 
     pit_init(100);
+    stack_protector_seed();
+    cpu_hardening_init();
+    kprintf("CPU: hardening smep=%s smap=%s\n",
+            cpu_hardening_smep_enabled() ? "on" : "off",
+            cpu_hardening_smap_enabled() ? "on" : "off");
     keyboard_init();
     mouse_init((int)fb_width(), (int)fb_height());
     ata_init();

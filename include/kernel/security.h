@@ -41,6 +41,12 @@
 #define SECURITY_FEATURE_REMOTE_AV_REQUIRED 30u
 #define SECURITY_FEATURE_REMOTE_LICENSE_REQUIRED 31u
 #define SECURITY_FEATURE_BLOCK_USER_SERVER_ACCESS 32u
+#define SECURITY_FEATURE_IMMUTABLE_LOCKDOWN 33u
+#define SECURITY_FEATURE_SIGNED_POLICY_ONLY 34u
+#define SECURITY_FEATURE_REQUIRE_MANIFEST_SIGNATURE 35u
+#define SECURITY_FEATURE_SERVER_PINNED_CHANNEL 36u
+#define SECURITY_FEATURE_OFFLINE_SIGNED_FALLBACK 37u
+#define SECURITY_FEATURE_PERSIST_FAILSAFE_LOGS 38u
 
 #define SECURITY_SERVER_IP 0x0A000202u
 #define SECURITY_SERVER_AV_PORT 9443u
@@ -106,6 +112,8 @@ bool security_server_antivirus_verify(const char *path, const char *sha256_hex,
                                       char *reason, size_t reason_len);
 bool security_server_license_verify(const char *license_key, char *reason, size_t reason_len);
 bool security_user_server_access_allowed(void);
+bool security_ip_is_verification_server(uint32_t ip);
+void security_server_endpoint(uint32_t *out_ip, uint16_t *out_av_port, uint16_t *out_license_port);
 
 bool security_verify_integrity_now(char *summary, size_t summary_len);
 uint32_t security_intrusion_threshold(void);

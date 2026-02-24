@@ -24,9 +24,13 @@ ifeq ($(shell command -v $(AS) >/dev/null 2>&1; echo $$?),1)
 $(error Missing assembler '$(AS)'. Install NASM.)
 endif
 
-CFLAGS := $(TARGET_FLAGS) -std=gnu11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -m64 -mno-red-zone -mcmodel=kernel -mno-mmx -mno-sse -mno-sse2 -msoft-float -fno-tree-vectorize -Wall -Wextra -Iinclude
+CFLAGS := $(TARGET_FLAGS) -std=gnu11 -ffreestanding -fstack-protector -fno-pic -fno-pie -m64 -mno-red-zone -mcmodel=kernel -mno-mmx -mno-sse -mno-sse2 -msoft-float -fno-tree-vectorize -Wall -Wextra -Iinclude
 LDFLAGS := -nostdlib -z max-page-size=0x1000 -T boot/linker.ld
 APP_CFLAGS := $(TARGET_FLAGS) -std=gnu11 -ffreestanding -fno-pic -fno-pie -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -msoft-float -fno-tree-vectorize -nostdlib -Wall -Wextra -Iapps/named/common
+
+GENERATED_DIR := $(BUILD_DIR)/generated/include/generated
+GENERATED_SECURITY_KEYS := $(GENERATED_DIR)/security_keys.h
+CFLAGS += -I$(BUILD_DIR)/generated/include
 
 KERNEL_C_SRCS := \
 	kernel/main.c \
@@ -35,7 +39,9 @@ KERNEL_C_SRCS := \
 	kernel/panic.c \
 	kernel/idt.c \
 	kernel/gdt.c \
+	kernel/cpu_hardening.c \
 	kernel/mp.c \
+	kernel/stack_protector.c \
 	kernel/syscall.c \
 	kernel/shell.c \
 	kernel/security.c \
@@ -107,13 +113,15 @@ LICENSE_NOTICE_SRC := assets/licenses/NOTICE.txt
 LICENSE_REVOKED_SRC := assets/licenses/licenses.revoked
 LICENSE_INTEGRITY_SRC := assets/licenses/licenses_integrity.json
 LICENSE_TEXT_SRC := LICENSE
+SYSTEM_CONFIG_SRC := assets/config/system.cfg
 SECURITY_MANIFEST := $(BUILD_DIR)/autogen/security_manifest.txt
+SECURITY_MANIFEST_SIG := $(BUILD_DIR)/autogen/security_manifest.sig
 GUI_ASSET_MANIFEST := assets/gui/manifest.csv
 GUI_ASSETS_DIR := assets/gui
 COMPAT_WRAP_DIR := $(BUILD_DIR)/compat
 COMPAT_WRAPPERS := $(COMPAT_WRAP_DIR)/secdiag_win.exe $(COMPAT_WRAP_DIR)/secdiag_mac.app $(COMPAT_WRAP_DIR)/secdiag_linux.bin
 COMPAT_ROOTFS_MAPS := /bin/secdiag_win.exe=$(COMPAT_WRAP_DIR)/secdiag_win.exe /bin/secdiag_mac.app=$(COMPAT_WRAP_DIR)/secdiag_mac.app /bin/secdiag_linux.bin=$(COMPAT_WRAP_DIR)/secdiag_linux.bin
-ROOTFS_EXTRA_MAPS := /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) /etc/licenses.db=$(LICENSE_DB_SRC) /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) /etc/ecosystem_apps.txt=$(ECOSYSTEM_SRC) /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST) /etc/security_manifest.txt=$(SECURITY_MANIFEST) $(COMPAT_ROOTFS_MAPS)
+ROOTFS_EXTRA_MAPS := /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) /etc/licenses.db=$(LICENSE_DB_SRC) /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) /etc/system.cfg=$(SYSTEM_CONFIG_SRC) /etc/ecosystem_apps.txt=$(ECOSYSTEM_SRC) /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST) /etc/security_manifest.txt=$(SECURITY_MANIFEST) /etc/security_manifest.sig=$(SECURITY_MANIFEST_SIG) $(COMPAT_ROOTFS_MAPS)
 ROOTFS_IMG := $(BUILD_DIR)/rootfs.sfs
 DISK_IMAGE := $(BUILD_DIR)/$(OS_NAME)_disk.img
 KERNEL_ELF := $(BUILD_DIR)/kernel.elf
@@ -126,6 +134,10 @@ all: iso
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
+$(GENERATED_SECURITY_KEYS): tools/generate_security_keys.py | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(PY) tools/generate_security_keys.py --output $@
+
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -133,6 +145,8 @@ $(BUILD_DIR)/%.o: %.c
 $(BUILD_DIR)/%.o: %.asm
 	@mkdir -p $(dir $@)
 	$(AS) -f elf64 $< -o $@
+
+$(KERNEL_C_OBJS): $(GENERATED_SECURITY_KEYS)
 
 kernel: $(KERNEL_ELF)
 
@@ -182,22 +196,26 @@ $(COMPAT_WRAP_DIR)/secdiag_linux.bin: $(BUILD_DIR)/apps/named/secdiag.elf tools/
 	@mkdir -p $(dir $@)
 	$(PY) tools/wrap_compat_app.py --input-elf $< --platform linux --output $@
 
-$(SECURITY_MANIFEST): tools/generate_security_manifest.py $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(GUI_ASSET_MANIFEST) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST)
+$(SECURITY_MANIFEST): tools/generate_security_manifest.py $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(SYSTEM_CONFIG_SRC) $(GUI_ASSET_MANIFEST) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST)
 	@mkdir -p $(dir $@)
-	$(PY) tools/generate_security_manifest.py --output $@ \
+	$(PY) tools/generate_security_manifest.py --output $(SECURITY_MANIFEST) \
+		--signature $(SECURITY_MANIFEST_SIG) \
 		--add /etc/LICENSE.txt=$(LICENSE_TEXT_SRC) \
 		--add /etc/licenses.db=$(LICENSE_DB_SRC) \
 		--add /etc/licenses.revoked=$(LICENSE_REVOKED_SRC) \
 		--add /etc/license_notice.txt=$(LICENSE_NOTICE_SRC) \
 		--add /etc/licenses_integrity.json=$(LICENSE_INTEGRITY_SRC) \
+		--add /etc/system.cfg=$(SYSTEM_CONFIG_SRC) \
 		--add /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) \
 		--add /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST) \
 		--add /assets/gui/manifest.csv=$(GUI_ASSET_MANIFEST)
 
+$(SECURITY_MANIFEST_SIG): $(SECURITY_MANIFEST)
+
 gui-assets:
 	$(PY) tools/generate_gui_assets.py
 
-$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(COMPAT_WRAPPERS) $(SECURITY_MANIFEST) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
+$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(COMPAT_WRAPPERS) $(SECURITY_MANIFEST) $(SECURITY_MANIFEST_SIG) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(SYSTEM_CONFIG_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
 	@mkdir -p $(dir $@)
 	$(PY) tools/mkrootfs.py $@ \
 		$(foreach map,$(ROOTFS_APP_MAPS),--add $(map)) \

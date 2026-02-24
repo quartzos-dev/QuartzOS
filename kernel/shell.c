@@ -776,12 +776,17 @@ static int path_is_security_protected(const char *path) {
         path_equals(path, "/etc/licenses.revoked") ||
         path_equals(path, "/etc/license.state") ||
         path_equals(path, "/etc/license.accept") ||
+        path_equals(path, "/etc/license.hardware") ||
         path_equals(path, "/etc/licenses_integrity.json") ||
         path_equals(path, "/etc/licenses_audit.csv") ||
         path_equals(path, "/etc/licenses_meta.csv") ||
+        path_equals(path, "/etc/licenses_tracking.csv") ||
         path_equals(path, "/etc/system.cfg") ||
         path_equals(path, "/etc/security.cfg") ||
+        path_equals(path, "/etc/security.cfg.sig") ||
         path_equals(path, "/etc/security_manifest.txt") ||
+        path_equals(path, "/etc/security_manifest.sig") ||
+        path_equals(path, "/etc/security_failsafe.log") ||
         path_equals(path, "/etc/cron.cfg") ||
         path_equals(path, "/etc/LICENSE.txt") ||
         path_equals(path, "/etc/license_notice.txt")) {
@@ -803,10 +808,15 @@ static int path_is_sensitive_read(const char *path) {
     }
     return path_equals(path, "/etc/license.state") ||
            path_equals(path, "/etc/license.accept") ||
+           path_equals(path, "/etc/license.hardware") ||
            path_equals(path, "/etc/licenses.db") ||
            path_equals(path, "/etc/licenses.revoked") ||
+           path_equals(path, "/etc/licenses_tracking.csv") ||
            path_equals(path, "/etc/security.cfg") ||
-           path_equals(path, "/etc/security_manifest.txt");
+           path_equals(path, "/etc/security.cfg.sig") ||
+           path_equals(path, "/etc/security_manifest.txt") ||
+           path_equals(path, "/etc/security_manifest.sig") ||
+           path_equals(path, "/etc/security_failsafe.log");
 }
 
 static int command_is_privileged(const char *cmd) {
@@ -2268,7 +2278,7 @@ static void execute_line(char *input) {
             kprintf("ping: invalid ip\n");
             return;
         }
-        if (ip == SECURITY_SERVER_IP) {
+        if (security_ip_is_verification_server(ip)) {
             security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "ping-server-ip");
             kprintf("ping: destination restricted\n");
             return;
@@ -2321,7 +2331,7 @@ static void execute_line(char *input) {
             kprintf("tcpsend: invalid ip\n");
             return;
         }
-        if (ip == SECURITY_SERVER_IP) {
+        if (security_ip_is_verification_server(ip)) {
             security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "tcpsend-server-ip");
             kprintf("tcpsend: destination restricted\n");
             return;

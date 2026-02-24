@@ -1,3 +1,4 @@
+#include <drivers/pit.h>
 #include <kernel/gdt.h>
 #include <kernel/interrupts.h>
 #include <memory/pmm.h>
@@ -17,10 +18,16 @@
 #define EM_X86_64 0x3Eu
 #define USER_STACK_TOP 0x0000007000000000ULL
 #define USER_STACK_PAGES 16
+#define USER_STACK_GUARD_LOW_PAGES 1
+#define USER_STACK_GUARD_HIGH_PAGES 1
+#define USER_STACK_RANDOM_PAGES 64
+#define USER_STACK_REGION_PAGES \
+    (USER_STACK_PAGES + USER_STACK_GUARD_LOW_PAGES + USER_STACK_GUARD_HIGH_PAGES + USER_STACK_RANDOM_PAGES)
 #define USER_IMAGE_MIN 0x0000000000001000ULL
-#define USER_IMAGE_MAX (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
+#define USER_IMAGE_MAX (USER_STACK_TOP - USER_STACK_REGION_PAGES * PAGE_SIZE)
 #define USER_MAX_MAPPED_PAGES 8192
 #define USER_MAX_PHDRS 256
+#define USER_MAX_LOAD_SEGMENTS 64
 
 typedef struct elf64_ehdr {
     uint32_t e_magic;
@@ -196,9 +203,34 @@ static int map_segment(uint64_t vaddr, const uint8_t *src, uint64_t filesz, uint
     return 1;
 }
 
-static int map_user_stack(void) {
-    uint64_t start = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
-    for (uint64_t addr = start; addr < USER_STACK_TOP; addr += PAGE_SIZE) {
+static uint64_t stack_random_pages(const void *image, size_t size, uint64_t entry) {
+    uint64_t seed = pit_ticks();
+    seed ^= (uint64_t)(uintptr_t)image;
+    seed ^= (uint64_t)size << 7;
+    seed ^= entry << 11;
+    seed ^= (seed << 13);
+    seed ^= (seed >> 7);
+    seed ^= (seed << 17);
+    return seed % (USER_STACK_RANDOM_PAGES + 1ULL);
+}
+
+static int map_user_stack(const void *image, size_t size, uint64_t entry, uint64_t *user_sp_out) {
+    if (!user_sp_out) {
+        return 0;
+    }
+
+    uint64_t random_pages = stack_random_pages(image, size, entry);
+    uint64_t region_base = USER_STACK_TOP - USER_STACK_REGION_PAGES * PAGE_SIZE;
+    uint64_t guard_low = region_base + random_pages * PAGE_SIZE;
+    uint64_t start = guard_low + USER_STACK_GUARD_LOW_PAGES * PAGE_SIZE;
+    uint64_t top = start + USER_STACK_PAGES * PAGE_SIZE;
+    uint64_t guard_high_end = top + USER_STACK_GUARD_HIGH_PAGES * PAGE_SIZE;
+
+    if (guard_high_end > USER_STACK_TOP) {
+        return 0;
+    }
+
+    for (uint64_t addr = start; addr < top; addr += PAGE_SIZE) {
         if (vmm_translate(addr) != 0) {
             return 0;
         }
@@ -213,6 +245,7 @@ static int map_user_stack(void) {
             return 0;
         }
     }
+    *user_sp_out = top - 16u;
     return 1;
 }
 
@@ -251,6 +284,7 @@ bool user_run_elf(const void *image, size_t size) {
     g_user_page_count = 0;
     const uint8_t *base = (const uint8_t *)image;
     int has_load = 0;
+    uint16_t load_segments = 0;
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         uint64_t off = eh->e_phoff + (uint64_t)i * eh->e_phentsize;
         if (off + sizeof(elf64_phdr_t) > size) {
@@ -263,7 +297,29 @@ bool user_run_elf(const void *image, size_t size) {
             continue;
         }
         has_load = 1;
+        load_segments++;
+        if (load_segments > USER_MAX_LOAD_SEGMENTS) {
+            user_unmap_all_pages();
+            return false;
+        }
+        if ((ph->p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) {
+            user_unmap_all_pages();
+            return false;
+        }
+        if (ph->p_memsz == 0 || ph->p_memsz < ph->p_filesz) {
+            user_unmap_all_pages();
+            return false;
+        }
         if (ph->p_align != 0 && (ph->p_align & (ph->p_align - 1u)) != 0) {
+            user_unmap_all_pages();
+            return false;
+        }
+        if (ph->p_align > PAGE_SIZE) {
+            user_unmap_all_pages();
+            return false;
+        }
+        if (ph->p_align != 0 &&
+            ((ph->p_vaddr & (ph->p_align - 1u)) != (ph->p_offset & (ph->p_align - 1u)))) {
             user_unmap_all_pages();
             return false;
         }
@@ -272,7 +328,7 @@ bool user_run_elf(const void *image, size_t size) {
             return false;
         }
 
-        if (ph->p_offset + ph->p_filesz > size) {
+        if (ph->p_offset > size || ph->p_filesz > size - ph->p_offset) {
             user_unmap_all_pages();
             return false;
         }
@@ -283,7 +339,8 @@ bool user_run_elf(const void *image, size_t size) {
         }
     }
 
-    if (!map_user_stack()) {
+    uint64_t user_stack = 0;
+    if (!map_user_stack(image, size, eh->e_entry, &user_stack)) {
         user_unmap_all_pages();
         return false;
     }
@@ -298,7 +355,7 @@ bool user_run_elf(const void *image, size_t size) {
 
     g_user_active = 1;
     g_user_in_ring3 = 1;
-    user_enter_ring3(eh->e_entry, USER_STACK_TOP - 16);
+    user_enter_ring3(eh->e_entry, user_stack);
 
     interrupts_enable();
     g_user_in_ring3 = 0;

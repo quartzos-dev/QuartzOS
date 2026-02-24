@@ -3,18 +3,43 @@
 #include <kernel/secure_store.h>
 #include <lib/string.h>
 #include <memory/heap.h>
+#include <generated/security_keys.h>
 #include <stdint.h>
 
 #define SECURE_PREFIX "QENC1|"
 #define SECURE_PREFIX_LEN 6u
+#define SECURE_VERSION_V2 "v2"
+#define SECURE_VERSION_V2_LEN 2u
 #define SECURE_NONCE_BYTES 8u
 #define SECURE_TAG_BYTES 32u
-
-static const uint8_t SECURE_KEY_ENC[] = "QuartzOS-SecureStore-ENC-V1-2026";
-static const uint8_t SECURE_KEY_MAC[] = "QuartzOS-SecureStore-MAC-V1-2026";
-static const uint8_t SECURE_KEY_MAC_COMPAT[] = "QuartzOS-SecureStore-ENC-V1-2026";
+#define SECURE_KID_CURRENT 0x01u
+#define SECURE_KID_PREVIOUS 0x02u
+#define SECURE_AAD_V2_BASE_LEN (SECURE_PREFIX_LEN + SECURE_VERSION_V2_LEN + 1u + 1u + 4u)
 
 static uint64_t g_nonce_ctr;
+
+typedef struct secure_key_pair {
+    uint8_t kid;
+    const uint8_t *enc;
+    size_t enc_len;
+    const uint8_t *mac;
+    size_t mac_len;
+} secure_key_pair_t;
+
+static const secure_key_pair_t SECURE_KEY_PAIRS[] = {
+    {SECURE_KID_CURRENT,
+     QOS_KEY_SECURESTORE_ENC, sizeof(QOS_KEY_SECURESTORE_ENC),
+     QOS_KEY_SECURESTORE_MAC, sizeof(QOS_KEY_SECURESTORE_MAC)},
+    {SECURE_KID_PREVIOUS,
+     QOS_KEY_SECURESTORE_ENC_PREV, sizeof(QOS_KEY_SECURESTORE_ENC_PREV),
+     QOS_KEY_SECURESTORE_MAC_PREV, sizeof(QOS_KEY_SECURESTORE_MAC_PREV)},
+    {0x80u,
+     QOS_LEGACY_SECURESTORE_ENC, sizeof(QOS_LEGACY_SECURESTORE_ENC),
+     QOS_LEGACY_SECURESTORE_MAC, sizeof(QOS_LEGACY_SECURESTORE_MAC)},
+    {0x81u,
+     QOS_LEGACY_SECURESTORE_ENC, sizeof(QOS_LEGACY_SECURESTORE_ENC),
+     QOS_LEGACY_SECURESTORE_MAC_COMPAT, sizeof(QOS_LEGACY_SECURESTORE_MAC_COMPAT)},
+};
 
 typedef struct sha256_ctx {
     uint32_t state[8];
@@ -271,6 +296,62 @@ static int constant_time_equal_bytes(const uint8_t *a, const uint8_t *b, size_t 
     return diff == 0;
 }
 
+static void encode_u32_le(uint32_t value, uint8_t out[4]) {
+    out[0] = (uint8_t)(value & 0xFFu);
+    out[1] = (uint8_t)((value >> 8) & 0xFFu);
+    out[2] = (uint8_t)((value >> 16) & 0xFFu);
+    out[3] = (uint8_t)((value >> 24) & 0xFFu);
+}
+
+static bool secure_store_path_valid(const char *path) {
+    if (!path || path[0] != '/') {
+        return false;
+    }
+    size_t len = strlen(path);
+    if (len < 2u || len >= 256u) {
+        return false;
+    }
+    for (size_t i = 0; i + 1u < len; i++) {
+        if (path[i] == '/' && path[i + 1] == '/') {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (path[i] != '/') {
+            continue;
+        }
+        if (i + 2u < len && path[i + 1] == '.' && path[i + 2] == '/') {
+            return false;
+        }
+        if (i + 3u < len && path[i + 1] == '.' && path[i + 2] == '.' &&
+            (path[i + 3] == '/' || path[i + 3] == '\0')) {
+            return false;
+        }
+        if (i + 2u == len && path[i + 1] == '.') {
+            return false;
+        }
+        if (i + 3u == len && path[i + 1] == '.' && path[i + 2] == '.') {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = path[i];
+        if (c < 0x20 || c == 0x7F || c == '\\' || c == ':' || c == '|') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static const secure_key_pair_t *find_key_pair_by_kid(uint8_t kid) {
+    for (size_t i = 0; i < (sizeof(SECURE_KEY_PAIRS) / sizeof(SECURE_KEY_PAIRS[0])); i++) {
+        if (SECURE_KEY_PAIRS[i].kid == kid) {
+            return &SECURE_KEY_PAIRS[i];
+        }
+    }
+    return 0;
+}
+
 static void generate_nonce(uint8_t nonce[SECURE_NONCE_BYTES]) {
     uint64_t seed = pit_ticks();
     g_nonce_ctr++;
@@ -286,7 +367,8 @@ static void generate_nonce(uint8_t nonce[SECURE_NONCE_BYTES]) {
 }
 
 static void stream_xor(const uint8_t nonce[SECURE_NONCE_BYTES],
-                       const uint8_t *in, uint8_t *out, size_t len) {
+                       const uint8_t *in, uint8_t *out, size_t len,
+                       const uint8_t *key_enc, size_t key_enc_len) {
     uint32_t counter = 0;
     size_t pos = 0;
 
@@ -300,7 +382,7 @@ static void stream_xor(const uint8_t nonce[SECURE_NONCE_BYTES],
         msg[SECURE_NONCE_BYTES + 2] = (uint8_t)(counter >> 8);
         msg[SECURE_NONCE_BYTES + 3] = (uint8_t)(counter);
 
-        hmac_sha256(SECURE_KEY_ENC, sizeof(SECURE_KEY_ENC) - 1, msg, sizeof(msg), block);
+        hmac_sha256(key_enc, key_enc_len, msg, sizeof(msg), block);
         size_t take = len - pos;
         if (take > sizeof(block)) {
             take = sizeof(block);
@@ -315,10 +397,10 @@ static void stream_xor(const uint8_t nonce[SECURE_NONCE_BYTES],
     }
 }
 
-static void compute_tag_with_key(const uint8_t *key, size_t key_len,
-                                 const uint8_t nonce[SECURE_NONCE_BYTES],
-                                 const uint8_t *cipher, size_t cipher_len,
-                                 uint8_t tag[SECURE_TAG_BYTES]) {
+static void compute_tag_legacy_with_key(const uint8_t *key, size_t key_len,
+                                        const uint8_t nonce[SECURE_NONCE_BYTES],
+                                        const uint8_t *cipher, size_t cipher_len,
+                                        uint8_t tag[SECURE_TAG_BYTES]) {
     size_t msg_len = SECURE_PREFIX_LEN + SECURE_NONCE_BYTES + cipher_len;
     uint8_t *msg = (uint8_t *)kmalloc(msg_len);
     if (!msg) {
@@ -334,10 +416,193 @@ static void compute_tag_with_key(const uint8_t *key, size_t key_len,
     kfree(msg);
 }
 
-static void compute_tag(const uint8_t nonce[SECURE_NONCE_BYTES],
-                        const uint8_t *cipher, size_t cipher_len,
-                        uint8_t tag[SECURE_TAG_BYTES]) {
-    compute_tag_with_key(SECURE_KEY_MAC, sizeof(SECURE_KEY_MAC) - 1, nonce, cipher, cipher_len, tag);
+static void compute_tag_v2_with_key(const uint8_t *key, size_t key_len,
+                                    uint8_t kid,
+                                    const uint8_t nonce[SECURE_NONCE_BYTES],
+                                    const uint8_t *cipher, size_t cipher_len,
+                                    uint8_t tag[SECURE_TAG_BYTES]) {
+    uint8_t aad[SECURE_AAD_V2_BASE_LEN];
+    size_t pos = 0;
+    memcpy(aad + pos, SECURE_PREFIX, SECURE_PREFIX_LEN);
+    pos += SECURE_PREFIX_LEN;
+    memcpy(aad + pos, SECURE_VERSION_V2 "|", SECURE_VERSION_V2_LEN + 1u);
+    pos += SECURE_VERSION_V2_LEN + 1u;
+    aad[pos++] = kid;
+    encode_u32_le((uint32_t)cipher_len, aad + pos);
+    pos += 4u;
+
+    size_t msg_len = pos + SECURE_NONCE_BYTES + cipher_len;
+    uint8_t *msg = (uint8_t *)kmalloc(msg_len == 0 ? 1 : msg_len);
+    if (!msg) {
+        memset(tag, 0, SECURE_TAG_BYTES);
+        return;
+    }
+
+    memcpy(msg, aad, pos);
+    memcpy(msg + pos, nonce, SECURE_NONCE_BYTES);
+    if (cipher_len > 0) {
+        memcpy(msg + pos + SECURE_NONCE_BYTES, cipher, cipher_len);
+    }
+    hmac_sha256(key, key_len, msg, msg_len, tag);
+    kfree(msg);
+}
+
+static bool decrypt_v1_blob(const char *p, const char *end,
+                            char *out, size_t out_len, size_t *out_read) {
+    const char *pipe1 = p;
+    while (pipe1 < end && *pipe1 != '|') {
+        pipe1++;
+    }
+    if (pipe1 >= end) {
+        return false;
+    }
+
+    const char *pipe2 = pipe1 + 1;
+    while (pipe2 < end && *pipe2 != '|') {
+        pipe2++;
+    }
+    if (pipe2 >= end) {
+        return false;
+    }
+
+    size_t nonce_hex_len = (size_t)(pipe1 - p);
+    size_t cipher_hex_len = (size_t)(pipe2 - (pipe1 + 1));
+    size_t tag_hex_len = (size_t)(end - (pipe2 + 1));
+
+    if (nonce_hex_len != SECURE_NONCE_BYTES * 2 ||
+        tag_hex_len != SECURE_TAG_BYTES * 2 ||
+        (cipher_hex_len % 2) != 0) {
+        return false;
+    }
+
+    size_t cipher_len = cipher_hex_len / 2;
+    if (cipher_len + 1u > out_len) {
+        return false;
+    }
+
+    uint8_t nonce[SECURE_NONCE_BYTES];
+    uint8_t tag[SECURE_TAG_BYTES];
+    uint8_t *cipher = (uint8_t *)kmalloc(cipher_len == 0 ? 1 : cipher_len);
+    if (!cipher) {
+        return false;
+    }
+
+    bool ok = parse_hex_bytes(p, nonce_hex_len, nonce, sizeof(nonce)) &&
+              (cipher_len == 0u || parse_hex_bytes(pipe1 + 1, cipher_hex_len, cipher, cipher_len)) &&
+              parse_hex_bytes(pipe2 + 1, tag_hex_len, tag, sizeof(tag));
+    if (!ok) {
+        kfree(cipher);
+        return false;
+    }
+
+    for (size_t i = 0; i < (sizeof(SECURE_KEY_PAIRS) / sizeof(SECURE_KEY_PAIRS[0])); i++) {
+        uint8_t expected_tag[SECURE_TAG_BYTES];
+        const secure_key_pair_t *pair = &SECURE_KEY_PAIRS[i];
+        compute_tag_legacy_with_key(pair->mac, pair->mac_len, nonce, cipher, cipher_len, expected_tag);
+        if (!constant_time_equal_bytes(tag, expected_tag, sizeof(tag))) {
+            continue;
+        }
+        if (cipher_len > 0) {
+            stream_xor(nonce, cipher, (uint8_t *)out, cipher_len, pair->enc, pair->enc_len);
+        }
+        out[cipher_len] = '\0';
+        if (out_read) {
+            *out_read = cipher_len;
+        }
+        kfree(cipher);
+        return true;
+    }
+
+    kfree(cipher);
+    return false;
+}
+
+static bool decrypt_v2_blob(const char *p, const char *end,
+                            char *out, size_t out_len, size_t *out_read) {
+    /* format: QENC1|v2|<kid-hex2>|<nonce-hex>|<cipher-hex>|<tag-hex> */
+    const char *kid_start = p;
+    const char *pipe1 = kid_start;
+    while (pipe1 < end && *pipe1 != '|') {
+        pipe1++;
+    }
+    if (pipe1 >= end) {
+        return false;
+    }
+
+    const char *nonce_start = pipe1 + 1;
+    const char *pipe2 = nonce_start;
+    while (pipe2 < end && *pipe2 != '|') {
+        pipe2++;
+    }
+    if (pipe2 >= end) {
+        return false;
+    }
+
+    const char *cipher_start = pipe2 + 1;
+    const char *pipe3 = cipher_start;
+    while (pipe3 < end && *pipe3 != '|') {
+        pipe3++;
+    }
+    if (pipe3 >= end) {
+        return false;
+    }
+
+    const char *tag_start = pipe3 + 1;
+    size_t kid_hex_len = (size_t)(pipe1 - kid_start);
+    size_t nonce_hex_len = (size_t)(pipe2 - nonce_start);
+    size_t cipher_hex_len = (size_t)(pipe3 - cipher_start);
+    size_t tag_hex_len = (size_t)(end - tag_start);
+    if (kid_hex_len != 2u ||
+        nonce_hex_len != SECURE_NONCE_BYTES * 2u ||
+        tag_hex_len != SECURE_TAG_BYTES * 2u ||
+        (cipher_hex_len % 2u) != 0u) {
+        return false;
+    }
+
+    uint8_t kid_buf[1];
+    if (!parse_hex_bytes(kid_start, kid_hex_len, kid_buf, sizeof(kid_buf))) {
+        return false;
+    }
+    const secure_key_pair_t *pair = find_key_pair_by_kid(kid_buf[0]);
+    if (!pair) {
+        return false;
+    }
+
+    size_t cipher_len = cipher_hex_len / 2u;
+    if (cipher_len + 1u > out_len) {
+        return false;
+    }
+
+    uint8_t nonce[SECURE_NONCE_BYTES];
+    uint8_t tag[SECURE_TAG_BYTES];
+    uint8_t expected_tag[SECURE_TAG_BYTES];
+    uint8_t *cipher = (uint8_t *)kmalloc(cipher_len == 0 ? 1 : cipher_len);
+    if (!cipher) {
+        return false;
+    }
+
+    bool ok = parse_hex_bytes(nonce_start, nonce_hex_len, nonce, sizeof(nonce)) &&
+              (cipher_len == 0u || parse_hex_bytes(cipher_start, cipher_hex_len, cipher, cipher_len)) &&
+              parse_hex_bytes(tag_start, tag_hex_len, tag, sizeof(tag));
+    if (!ok) {
+        kfree(cipher);
+        return false;
+    }
+
+    compute_tag_v2_with_key(pair->mac, pair->mac_len, pair->kid, nonce, cipher, cipher_len, expected_tag);
+    if (!constant_time_equal_bytes(tag, expected_tag, sizeof(tag))) {
+        kfree(cipher);
+        return false;
+    }
+    if (cipher_len > 0) {
+        stream_xor(nonce, cipher, (uint8_t *)out, cipher_len, pair->enc, pair->enc_len);
+    }
+    out[cipher_len] = '\0';
+    if (out_read) {
+        *out_read = cipher_len;
+    }
+    kfree(cipher);
+    return true;
 }
 
 bool secure_store_is_encrypted_blob(const char *text) {
@@ -371,76 +636,15 @@ static bool decrypt_text(const char *text, char *out, size_t out_len, size_t *ou
     const char *p = text + SECURE_PREFIX_LEN;
     const char *end = text + len;
 
-    const char *pipe1 = p;
-    while (pipe1 < end && *pipe1 != '|') {
-        pipe1++;
+    if ((size_t)(end - p) > (SECURE_VERSION_V2_LEN + 1u) &&
+        strncmp(p, SECURE_VERSION_V2 "|", SECURE_VERSION_V2_LEN + 1u) == 0) {
+        return decrypt_v2_blob(p + SECURE_VERSION_V2_LEN + 1u, end, out, out_len, out_read);
     }
-    if (pipe1 >= end) {
-        return false;
-    }
-
-    const char *pipe2 = pipe1 + 1;
-    while (pipe2 < end && *pipe2 != '|') {
-        pipe2++;
-    }
-    if (pipe2 >= end) {
-        return false;
-    }
-
-    size_t nonce_hex_len = (size_t)(pipe1 - p);
-    size_t cipher_hex_len = (size_t)(pipe2 - (pipe1 + 1));
-    size_t tag_hex_len = (size_t)(end - (pipe2 + 1));
-
-    if (nonce_hex_len != SECURE_NONCE_BYTES * 2 ||
-        tag_hex_len != SECURE_TAG_BYTES * 2 ||
-        cipher_hex_len == 0 ||
-        (cipher_hex_len % 2) != 0) {
-        return false;
-    }
-
-    size_t cipher_len = cipher_hex_len / 2;
-    if (cipher_len + 1 > out_len) {
-        return false;
-    }
-
-    uint8_t nonce[SECURE_NONCE_BYTES];
-    uint8_t tag[SECURE_TAG_BYTES];
-    uint8_t expected_tag[SECURE_TAG_BYTES];
-    uint8_t *cipher = (uint8_t *)kmalloc(cipher_len);
-    if (!cipher) {
-        return false;
-    }
-
-    bool ok = parse_hex_bytes(p, nonce_hex_len, nonce, sizeof(nonce)) &&
-              parse_hex_bytes(pipe1 + 1, cipher_hex_len, cipher, cipher_len) &&
-              parse_hex_bytes(pipe2 + 1, tag_hex_len, tag, sizeof(tag));
-
-    if (!ok) {
-        kfree(cipher);
-        return false;
-    }
-
-    compute_tag(nonce, cipher, cipher_len, expected_tag);
-    if (!constant_time_equal_bytes(tag, expected_tag, sizeof(tag))) {
-        compute_tag_with_key(SECURE_KEY_MAC_COMPAT, sizeof(SECURE_KEY_MAC_COMPAT) - 1,
-                             nonce, cipher, cipher_len, expected_tag);
-        if (!constant_time_equal_bytes(tag, expected_tag, sizeof(tag))) {
-            kfree(cipher);
-            return false;
-        }
-    }
-
-    stream_xor(nonce, cipher, (uint8_t *)out, cipher_len);
-    out[cipher_len] = '\0';
-    if (out_read) {
-        *out_read = cipher_len;
-    }
-    kfree(cipher);
-    return true;
+    return decrypt_v1_blob(p, end, out, out_len, out_read);
 }
 
 bool secure_store_read_text(const char *path, char *out, size_t out_len, size_t *out_read) {
-    if (!path || !out || out_len == 0) {
+    if (!path || !out || out_len == 0 || !secure_store_path_valid(path)) {
         return false;
     }
 
@@ -480,23 +684,26 @@ bool secure_store_read_text(const char *path, char *out, size_t out_len, size_t 
 }
 
 bool secure_store_write_text(const char *path, const char *plain, size_t plain_len, bool sync_now) {
-    if (!path || !plain) {
+    if (!path || !plain || !secure_store_path_valid(path)) {
         return false;
     }
 
     uint8_t nonce[SECURE_NONCE_BYTES];
     uint8_t tag[SECURE_TAG_BYTES];
     generate_nonce(nonce);
+    const secure_key_pair_t *pair = &SECURE_KEY_PAIRS[0];
 
     uint8_t *cipher = (uint8_t *)kmalloc(plain_len == 0 ? 1 : plain_len);
     if (!cipher) {
         return false;
     }
     if (plain_len > 0) {
-        stream_xor(nonce, (const uint8_t *)plain, cipher, plain_len);
+        stream_xor(nonce, (const uint8_t *)plain, cipher, plain_len,
+                   pair->enc, pair->enc_len);
     }
-    compute_tag(nonce, cipher, plain_len, tag);
+    compute_tag_v2_with_key(pair->mac, pair->mac_len, pair->kid, nonce, cipher, plain_len, tag);
 
+    char kid_hex[3];
     char nonce_hex[SECURE_NONCE_BYTES * 2 + 1];
     char tag_hex[SECURE_TAG_BYTES * 2 + 1];
     char *cipher_hex = (char *)kmalloc(plain_len * 2 + 1);
@@ -505,11 +712,13 @@ bool secure_store_write_text(const char *path, const char *plain, size_t plain_l
         return false;
     }
 
+    bytes_to_hex(&pair->kid, 1u, kid_hex);
     bytes_to_hex(nonce, sizeof(nonce), nonce_hex);
     bytes_to_hex(tag, sizeof(tag), tag_hex);
     bytes_to_hex(cipher, plain_len, cipher_hex);
 
-    size_t encoded_cap = SECURE_PREFIX_LEN + strlen(nonce_hex) + 1 +
+    size_t encoded_cap = SECURE_PREFIX_LEN + SECURE_VERSION_V2_LEN + 1 +
+                         strlen(kid_hex) + 1 + strlen(nonce_hex) + 1 +
                          strlen(cipher_hex) + 1 + strlen(tag_hex) + 2;
     char *encoded = (char *)kmalloc(encoded_cap);
     if (!encoded) {
@@ -521,6 +730,11 @@ bool secure_store_write_text(const char *path, const char *plain, size_t plain_l
     size_t idx = 0;
     memcpy(encoded + idx, SECURE_PREFIX, SECURE_PREFIX_LEN);
     idx += SECURE_PREFIX_LEN;
+    memcpy(encoded + idx, SECURE_VERSION_V2 "|", SECURE_VERSION_V2_LEN + 1u);
+    idx += SECURE_VERSION_V2_LEN + 1u;
+    memcpy(encoded + idx, kid_hex, strlen(kid_hex));
+    idx += strlen(kid_hex);
+    encoded[idx++] = '|';
     memcpy(encoded + idx, nonce_hex, strlen(nonce_hex));
     idx += strlen(nonce_hex);
     encoded[idx++] = '|';

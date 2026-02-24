@@ -7,6 +7,7 @@
 #include <lib/string.h>
 #include <memory/heap.h>
 #include <net/net.h>
+#include <generated/security_keys.h>
 #include <stdint.h>
 
 #define LICENSE_DB_PATH "/etc/licenses.db"
@@ -14,6 +15,7 @@
 #define LICENSE_STATE_PATH "/etc/license.state"
 #define LICENSE_TERMS_PATH "/etc/LICENSE.txt"
 #define LICENSE_ACCEPT_PATH "/etc/license.accept"
+#define LICENSE_HARDWARE_BIND_PATH "/etc/license.hardware"
 
 #define LICENSE_V1_KEY_LEN 27
 #define LICENSE_V2_KEY_LEN 44
@@ -75,10 +77,6 @@ static const uint32_t SHA256_K[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-static const uint8_t HMAC_KEY_V2[] = "QuartzOS-Licensing-HMAC-Key-V2-2026";
-static const uint8_t HMAC_KEY_V3[] = "QuartzOS-Licensing-HMAC-Key-V3-2026";
-static const uint8_t HMAC_KEY_STATE[] = "QuartzOS-License-State-MAC-V3-2026";
-
 static key_entry_t g_registry[LICENSE_MAX_KEYS];
 static key_entry_t g_revoked[LICENSE_MAX_REVOCATIONS];
 static size_t g_registry_count;
@@ -99,6 +97,8 @@ static int g_terms_accepted;
 static char g_terms_hash[65];
 static uint64_t g_server_verify_tick;
 static int g_server_verify_ok;
+static int g_hw_binding_required;
+static char g_hw_binding_hash[65];
 
 static int version_allowed(key_version_t version) {
     if (!LICENSE_REQUIRE_MODERN_ACTIVATION) {
@@ -417,6 +417,114 @@ static void bytes_to_hex(const uint8_t *bytes, size_t len, char *out) {
     out[len * 2] = '\0';
 }
 
+static void cpuid_query(uint32_t leaf, uint32_t subleaf,
+                        uint32_t *eax, uint32_t *ebx,
+                        uint32_t *ecx, uint32_t *edx) {
+    uint32_t a = 0;
+    uint32_t b = 0;
+    uint32_t c = 0;
+    uint32_t d = 0;
+    __asm__ volatile("cpuid"
+                     : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(leaf), "c"(subleaf));
+    if (eax) {
+        *eax = a;
+    }
+    if (ebx) {
+        *ebx = b;
+    }
+    if (ecx) {
+        *ecx = c;
+    }
+    if (edx) {
+        *edx = d;
+    }
+}
+
+static int cpu_fingerprint_hex(char out_hex[65]) {
+    uint8_t payload[64];
+    size_t used = 0;
+    uint32_t eax = 0;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
+
+    cpuid_query(0u, 0u, &eax, &ebx, &ecx, &edx);
+    if (eax == 0u && ebx == 0u && ecx == 0u && edx == 0u) {
+        return 0;
+    }
+
+    uint32_t max_leaf = eax;
+    memcpy(payload + used, &ebx, sizeof(ebx)); used += sizeof(ebx);
+    memcpy(payload + used, &edx, sizeof(edx)); used += sizeof(edx);
+    memcpy(payload + used, &ecx, sizeof(ecx)); used += sizeof(ecx);
+
+    cpuid_query(1u, 0u, &eax, &ebx, &ecx, &edx);
+    memcpy(payload + used, &eax, sizeof(eax)); used += sizeof(eax);
+    memcpy(payload + used, &ebx, sizeof(ebx)); used += sizeof(ebx);
+    memcpy(payload + used, &ecx, sizeof(ecx)); used += sizeof(ecx);
+    memcpy(payload + used, &edx, sizeof(edx)); used += sizeof(edx);
+
+    if (max_leaf >= 7u) {
+        cpuid_query(7u, 0u, &eax, &ebx, &ecx, &edx);
+        memcpy(payload + used, &eax, sizeof(eax)); used += sizeof(eax);
+        memcpy(payload + used, &ebx, sizeof(ebx)); used += sizeof(ebx);
+        memcpy(payload + used, &ecx, sizeof(ecx)); used += sizeof(ecx);
+        memcpy(payload + used, &edx, sizeof(edx)); used += sizeof(edx);
+    }
+
+    uint8_t digest[32];
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, payload, used);
+    sha256_final(&ctx, digest);
+    bytes_to_hex(digest, sizeof(digest), out_hex);
+    return 1;
+}
+
+static void load_hardware_binding(void) {
+    g_hw_binding_required = 0;
+    g_hw_binding_hash[0] = '\0';
+
+    char text[128];
+    size_t read = 0;
+    if (!secure_store_read_text(LICENSE_HARDWARE_BIND_PATH, text, sizeof(text), &read)) {
+        return;
+    }
+    text[read] = '\0';
+    char *p = text;
+    while (*p && is_space(*p)) {
+        p++;
+    }
+
+    char hash[65];
+    size_t i = 0;
+    while (p[i] && !is_space(p[i]) && i < 64u) {
+        if (hex_value(p[i]) < 0) {
+            return;
+        }
+        hash[i] = to_upper_ascii(p[i]);
+        i++;
+    }
+    if (i != 64u) {
+        return;
+    }
+    hash[64] = '\0';
+    memcpy(g_hw_binding_hash, hash, sizeof(g_hw_binding_hash));
+    g_hw_binding_required = 1;
+}
+
+static int hardware_binding_ok(void) {
+    if (!g_hw_binding_required) {
+        return 1;
+    }
+    char actual[65];
+    if (!cpu_fingerprint_hex(actual)) {
+        return 0;
+    }
+    return constant_time_equal(g_hw_binding_hash, actual, 64u);
+}
+
 static const char *tier_name_for_code(uint8_t code) {
     switch (code) {
         case 0x01: return "consumer";
@@ -584,7 +692,8 @@ static uint64_t digest_first_u64(const uint8_t digest[32]) {
     return value;
 }
 
-static uint64_t license_signature_v2_for(uint32_t id, uint16_t feature_bits, uint32_t nonce) {
+static uint64_t license_signature_v2_for_key(uint32_t id, uint16_t feature_bits, uint32_t nonce,
+                                             const uint8_t *key, size_t key_len) {
     char id_hex[9];
     char feat_hex[5];
     char nonce_hex[9];
@@ -604,14 +713,20 @@ static uint64_t license_signature_v2_for(uint32_t id, uint16_t feature_bits, uin
     strncat(payload, nonce_hex, sizeof(payload) - strlen(payload) - 1);
     strncat(payload, ":QUARTZOS-LICENSE-V2", sizeof(payload) - strlen(payload) - 1);
 
-    hmac_sha256(HMAC_KEY_V2, sizeof(HMAC_KEY_V2) - 1,
+    hmac_sha256(key, key_len,
                 (const uint8_t *)payload, strlen(payload), mac);
     return digest_first_u64(mac);
 }
 
-static void license_signature_v3_for(uint32_t id, uint8_t tier_code,
-                                     uint8_t policy_bits, uint32_t nonce,
-                                     uint8_t out_sig[12]) {
+static uint64_t license_signature_v2_for(uint32_t id, uint16_t feature_bits, uint32_t nonce) {
+    return license_signature_v2_for_key(id, feature_bits, nonce,
+                                        QOS_KEY_LICENSE_HMAC_V2, sizeof(QOS_KEY_LICENSE_HMAC_V2));
+}
+
+static void license_signature_v3_for_key(uint32_t id, uint8_t tier_code,
+                                         uint8_t policy_bits, uint32_t nonce,
+                                         const uint8_t *key, size_t key_len,
+                                         uint8_t out_sig[12]) {
     char id_hex[9];
     char tier_hex[3];
     char policy_hex[3];
@@ -635,9 +750,17 @@ static void license_signature_v3_for(uint32_t id, uint8_t tier_code,
     strncat(payload, nonce_hex, sizeof(payload) - strlen(payload) - 1);
     strncat(payload, ":QUARTZOS-LICENSE-V3", sizeof(payload) - strlen(payload) - 1);
 
-    hmac_sha256(HMAC_KEY_V3, sizeof(HMAC_KEY_V3) - 1,
+    hmac_sha256(key, key_len,
                 (const uint8_t *)payload, strlen(payload), mac);
     memcpy(out_sig, mac, 12);
+}
+
+static void license_signature_v3_for(uint32_t id, uint8_t tier_code,
+                                     uint8_t policy_bits, uint32_t nonce,
+                                     uint8_t out_sig[12]) {
+    license_signature_v3_for_key(id, tier_code, policy_bits, nonce,
+                                 QOS_KEY_LICENSE_HMAC_V3, sizeof(QOS_KEY_LICENSE_HMAC_V3),
+                                 out_sig);
 }
 
 static int key_signature_matches(const char *key, size_t key_len, key_version_t version) {
@@ -668,7 +791,12 @@ static int key_signature_matches(const char *key, size_t key_len, key_version_t 
             !parse_hex_u64(key + 28, 16, &sig)) {
             return 0;
         }
-        return sig == license_signature_v2_for(id, (uint16_t)feat, nonce);
+        if (sig == license_signature_v2_for(id, (uint16_t)feat, nonce)) {
+            return 1;
+        }
+        return sig == license_signature_v2_for_key(id, (uint16_t)feat, nonce,
+                                                   QOS_LEGACY_LICENSE_HMAC_V2,
+                                                   sizeof(QOS_LEGACY_LICENSE_HMAC_V2));
     }
 
     if (version == KEY_VERSION_V3) {
@@ -686,6 +814,13 @@ static int key_signature_matches(const char *key, size_t key_len, key_version_t 
             return 0;
         }
         license_signature_v3_for(id, tier, policy, nonce, expected);
+        if (constant_time_equal_bytes(sig, expected, sizeof(sig))) {
+            return 1;
+        }
+        license_signature_v3_for_key(id, tier, policy, nonce,
+                                     QOS_LEGACY_LICENSE_HMAC_V3,
+                                     sizeof(QOS_LEGACY_LICENSE_HMAC_V3),
+                                     expected);
         return constant_time_equal_bytes(sig, expected, sizeof(sig));
     }
 
@@ -830,26 +965,41 @@ static int lockout_active(void) {
     return g_lock_until_tick != 0 && now_ticks() < g_lock_until_tick;
 }
 
-static uint64_t signature_state_mac_v2(const char *value) {
+static uint64_t signature_state_mac_v2_with_key(const char *value,
+                                                const uint8_t *key, size_t key_len) {
     char payload[96];
     uint8_t mac[32];
     payload[0] = '\0';
     strncat(payload, "STATE:", sizeof(payload) - strlen(payload) - 1);
     strncat(payload, value, sizeof(payload) - strlen(payload) - 1);
-    hmac_sha256(HMAC_KEY_V2, sizeof(HMAC_KEY_V2) - 1,
+    hmac_sha256(key, key_len,
                 (const uint8_t *)payload, strlen(payload), mac);
     return digest_first_u64(mac);
 }
 
-static void signature_state_mac_v3(const char *value, uint8_t out_mac[12]) {
+static uint64_t signature_state_mac_v2(const char *value) {
+    return signature_state_mac_v2_with_key(value,
+                                           QOS_KEY_LICENSE_HMAC_V2,
+                                           sizeof(QOS_KEY_LICENSE_HMAC_V2));
+}
+
+static void signature_state_mac_v3_with_key(const char *value,
+                                            const uint8_t *key, size_t key_len,
+                                            uint8_t out_mac[12]) {
     char payload[128];
     uint8_t mac[32];
     payload[0] = '\0';
     strncat(payload, "STATEV3:", sizeof(payload) - strlen(payload) - 1);
     strncat(payload, value, sizeof(payload) - strlen(payload) - 1);
-    hmac_sha256(HMAC_KEY_STATE, sizeof(HMAC_KEY_STATE) - 1,
+    hmac_sha256(key, key_len,
                 (const uint8_t *)payload, strlen(payload), mac);
     memcpy(out_mac, mac, 12);
+}
+
+static void signature_state_mac_v3(const char *value, uint8_t out_mac[12]) {
+    signature_state_mac_v3_with_key(value,
+                                    QOS_KEY_LICENSE_STATE_MAC, sizeof(QOS_KEY_LICENSE_STATE_MAC),
+                                    out_mac);
 }
 
 static int write_signed_value(const char *path, const char *value) {
@@ -917,7 +1067,11 @@ static int read_signed_value(const char *path, char *value_out, size_t value_out
             }
             return 0;
         }
-        if (file_mac != signature_state_mac_v2(value)) {
+        uint64_t current = signature_state_mac_v2(value);
+        uint64_t legacy = signature_state_mac_v2_with_key(value,
+                                                          QOS_LEGACY_LICENSE_HMAC_V2,
+                                                          sizeof(QOS_LEGACY_LICENSE_HMAC_V2));
+        if (file_mac != current && file_mac != legacy) {
             if (tampered) {
                 *tampered = 1;
             }
@@ -934,10 +1088,16 @@ static int read_signed_value(const char *path, char *value_out, size_t value_out
         }
         signature_state_mac_v3(value, expected);
         if (!constant_time_equal_bytes(file_mac, expected, sizeof(file_mac))) {
-            if (tampered) {
-                *tampered = 1;
+            signature_state_mac_v3_with_key(value,
+                                            QOS_LEGACY_LICENSE_STATE_MAC,
+                                            sizeof(QOS_LEGACY_LICENSE_STATE_MAC),
+                                            expected);
+            if (!constant_time_equal_bytes(file_mac, expected, sizeof(file_mac))) {
+                if (tampered) {
+                    *tampered = 1;
+                }
+                return 0;
             }
-            return 0;
         }
     } else {
         if (tampered) {
@@ -1211,6 +1371,12 @@ static void load_state(void) {
         write_state_value("NONE");
         return;
     }
+    if (!hardware_binding_ok()) {
+        g_last_error = LICENSE_ERR_HARDWARE_MISMATCH;
+        audit_log("LICENSE_STATE_REJECT", "hardware-mismatch");
+        write_state_value("NONE");
+        return;
+    }
     set_active_key(normalized, normalized_len);
 }
 
@@ -1225,9 +1391,12 @@ void license_init(void) {
     g_terms_hash[0] = '\0';
     g_server_verify_tick = 0;
     g_server_verify_ok = 0;
+    g_hw_binding_required = 0;
+    g_hw_binding_hash[0] = '\0';
 
     load_registry();
     load_revocations();
+    load_hardware_binding();
     (void)load_terms_hash();
     load_accept_state();
     load_state();
@@ -1236,6 +1405,7 @@ void license_init(void) {
 void license_reload(void) {
     load_registry();
     load_revocations();
+    load_hardware_binding();
     (void)load_terms_hash();
     load_accept_state();
 
@@ -1330,6 +1500,10 @@ bool license_activate(const char *key) {
         record_activation_failure(LICENSE_ERR_MINIMUM_TIER, "minimum-tier", 1);
         return false;
     }
+    if (!hardware_binding_ok()) {
+        record_activation_failure(LICENSE_ERR_HARDWARE_MISMATCH, "hardware-mismatch", 1);
+        return false;
+    }
     if (security_feature_enabled(SECURITY_FEATURE_REMOTE_LICENSE_REQUIRED)) {
         license_error_t server_err = LICENSE_ERR_SERVER_REJECTED;
         const char *detail = "server-rejected";
@@ -1371,6 +1545,13 @@ bool license_is_active(void) {
         clear_active_key();
         write_state_value("NONE");
         audit_log("LICENSE_AUTO_DEACTIVATE", "minimum-tier");
+        return false;
+    }
+    if (!hardware_binding_ok()) {
+        clear_active_key();
+        write_state_value("NONE");
+        g_last_error = LICENSE_ERR_HARDWARE_MISMATCH;
+        audit_log("LICENSE_AUTO_DEACTIVATE", "hardware-mismatch");
         return false;
     }
     if (!refresh_active_server_verification()) {
@@ -1504,6 +1685,7 @@ const char *license_error_text(license_error_t error) {
         case LICENSE_ERR_MINIMUM_TIER: return "minimum-tier-required";
         case LICENSE_ERR_SERVER_UNREACHABLE: return "license-server-unreachable";
         case LICENSE_ERR_SERVER_REJECTED: return "license-server-rejected";
+        case LICENSE_ERR_HARDWARE_MISMATCH: return "hardware-mismatch";
         default: return "unknown";
     }
 }

@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
+import os
 from pathlib import Path
+
+DEFAULT_ROOT_SECRET = "QuartzOS-BuildRoot-2026"
+DEFAULT_BUILD_SALT = "quartzos-build-v1"
 
 
 def parse_add_mapping(item: str) -> tuple[str, Path]:
@@ -30,6 +35,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def derive_manifest_sign_key(root_secret: str, build_salt: str) -> bytes:
+    seed = root_secret.encode("utf-8")
+    out = bytearray()
+    counter = 0
+    while len(out) < 32:
+        msg = f"{build_salt}|security.manifest.sign|{counter}".encode("utf-8")
+        out.extend(hmac.new(seed, msg, hashlib.sha256).digest())
+        counter += 1
+    return bytes(out[:32])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate QuartzOS security integrity manifest")
     parser.add_argument("--output", required=True, help="output manifest path")
@@ -39,6 +55,11 @@ def main() -> int:
         default=[],
         metavar="ROOT=HOST",
         help="add a rootfs path to hash from a host file",
+    )
+    parser.add_argument(
+        "--signature",
+        default="",
+        help="optional path to write HMAC signature for the manifest",
     )
     args = parser.parse_args()
 
@@ -57,7 +78,17 @@ def main() -> int:
             raise SystemExit(f"missing input file: {host}")
         lines.append(f"{root}|{sha256_file(host)}")
 
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    manifest_text = "\n".join(lines) + "\n"
+    output_path.write_text(manifest_text, encoding="utf-8")
+
+    if args.signature:
+        sig_path = Path(args.signature)
+        sig_path.parent.mkdir(parents=True, exist_ok=True)
+        root_secret = os.getenv("QOS_BUILD_ROOT_SECRET", DEFAULT_ROOT_SECRET)
+        build_salt = os.getenv("QOS_BUILD_SALT", DEFAULT_BUILD_SALT)
+        key = derive_manifest_sign_key(root_secret, build_salt)
+        sig = hmac.new(key, manifest_text.encode("utf-8"), hashlib.sha256).hexdigest()
+        sig_path.write_text(sig + "\n", encoding="utf-8")
     return 0
 
 

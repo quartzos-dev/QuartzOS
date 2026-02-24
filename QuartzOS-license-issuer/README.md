@@ -86,11 +86,28 @@ Native app wrapper is in:
 
 - `/Users/qian/Music/OS/QuartzOS-license-issuer/macos_app`
 
+Advanced app features:
+
+- Multi-tab workflow (`Issue`, `Verify`, `Revocation`, `Store`).
+- Live output console with export.
+- Dashboard cards (issued, active, revoked, integrity).
+- Keychain integration for issuer password.
+- Batch key verify + key extraction.
+- Command history + rerun.
+- Store hardening tools from UI (`verify-store`, `seal-store`, `harden-store`, `password-hash`).
+
 Build:
 
 ```bash
 cd /Users/qian/Music/OS
 ./QuartzOS-license-issuer/macos_app/build_macos_app.sh
+```
+
+or:
+
+```bash
+cd /Users/qian/Music/OS
+./build_macos_app.sh
 ```
 
 Launch:
