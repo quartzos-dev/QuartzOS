@@ -167,8 +167,8 @@ typedef struct boot_profile {
 
 static const boot_profile_t PROFILE_NORMAL = {
     .name = "normal",
-    .quantum_ticks = 10,
-    .gui_prio = 14,
+    .quantum_ticks = 6,
+    .gui_prio = 18,
     .shell_prio = 20,
     .shell_rt = 1,
     .net_prio = 12,
@@ -187,8 +187,8 @@ static const boot_profile_t PROFILE_SAFE = {
 
 static const boot_profile_t PROFILE_PERF = {
     .name = "perf",
-    .quantum_ticks = 4,
-    .gui_prio = 18,
+    .quantum_ticks = 3,
+    .gui_prio = 20,
     .shell_prio = 20,
     .shell_rt = 1,
     .net_prio = 20,
@@ -257,6 +257,24 @@ static void boot_splash(const char *phase, uint32_t step, uint32_t total) {
 
     fb_draw_text(x + 20, y + 170, "If boot is slow, wait for shell and GUI tasks to finish loading.", 0x009eb9d2, 0x00131e2f);
     fb_present();
+}
+
+static void halt_unlicensed_boot(void) {
+    audit_log("LICENSE_BOOT_BLOCK", "no-verified-license");
+    kprintf("LICENSE: boot blocked. verified consumer monthly license required.\n");
+
+    fb_clear(0x00101826);
+    fb_draw_text(36, 46, "QuartzOS access denied", 0x00f2f8ff, 0x00101826);
+    fb_draw_text(36, 68, "No verified active license found.", 0x00e2c8b0, 0x00101826);
+    fb_draw_text(36, 86, "Minimum required: Consumer monthly license (QOS3).", 0x00d7bca6, 0x00101826);
+    fb_draw_text(36, 112, "Activate a valid license using QuartzOS-license-issuer,", 0x00b8cbe0, 0x00101826);
+    fb_draw_text(36, 128, "then reboot QuartzOS.", 0x00b8cbe0, 0x00101826);
+    fb_present();
+
+    interrupts_enable();
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
 }
 
 static const boot_profile_t *select_boot_profile(const char *name) {
@@ -466,6 +484,8 @@ void kernel_main(void) {
         kprintf("CRON: no persisted jobs\n");
     }
     service_init();
+    tasking_init();
+    net_init();
     security_init();
     if (!security_load()) {
         kprintf("SEC: no persisted security policy, using defaults\n");
@@ -478,8 +498,6 @@ void kernel_main(void) {
     }
     boot_splash("Runtime config + security", ++boot_step, boot_total_steps);
 
-    tasking_init();
-    net_init();
     license_init();
     int license_ready = license_usage_allowed() ? 1 : 0;
     int security_ready = security_lockdown_active() ? 0 : 1;
@@ -491,6 +509,7 @@ void kernel_main(void) {
     if (!license_ready) {
         kprintf("LICENSE: enforcement lock active (requires verified consumer monthly license)\n");
         audit_log("LICENSE_BOOT_LOCK", "minimum-consumer-monthly");
+        halt_unlicensed_boot();
     }
     kprintf("SECURITY: mode=%s failsafe(intrusion=%s integrity=%s)\n",
             security_mode_name(security_mode()),

@@ -16,6 +16,8 @@ static int smooth_y_fp;
 #define MOUSE_FP_SHIFT 8
 #define MOUSE_FP_ONE (1 << MOUSE_FP_SHIFT)
 
+static int clamp_coord(int value, int limit);
+
 static int abs_i(int value) {
     return value < 0 ? -value : value;
 }
@@ -60,6 +62,38 @@ static int smooth_step(int value_fp, int target_fp, int alpha) {
         step = diff > 0 ? 1 : -1;
     }
     return value_fp + step;
+}
+
+static void mouse_consume_byte(uint8_t data) {
+    if (packet_index == 0 && (data & 0x08u) == 0) {
+        return;
+    }
+    packet[packet_index++] = data;
+    if (packet_index < 3) {
+        return;
+    }
+    packet_index = 0;
+
+    if (packet[0] & 0xC0u) {
+        return;
+    }
+
+    int8_t dx = (int8_t)packet[1];
+    int8_t dy = (int8_t)packet[2];
+
+    int mx = invert_x ? -(int)dx : (int)dx;
+    int my = invert_y ? (int)dy : -(int)dy;
+    int mag = abs_i(mx) + abs_i(my);
+
+    mx = accel_delta(mx, mag);
+    my = accel_delta(my, mag);
+
+    raw_x = clamp_coord(raw_x + mx, limit_x);
+    raw_y = clamp_coord(raw_y + my, limit_y);
+
+    g_mouse.left = (packet[0] & 0x1) != 0;
+    g_mouse.right = (packet[0] & 0x2) != 0;
+    g_mouse.middle = (packet[0] & 0x4) != 0;
 }
 
 static int clamp_coord(int value, int limit) {
@@ -138,41 +172,13 @@ void mouse_init(int max_x, int max_y) {
 }
 
 void mouse_handle_irq(void) {
-    uint8_t status = inb(0x64);
-    if ((status & 0x01u) == 0 || (status & 0x20u) == 0) {
-        return;
+    for (int i = 0; i < 24; i++) {
+        uint8_t status = inb(0x64);
+        if ((status & 0x01u) == 0 || (status & 0x20u) == 0) {
+            break;
+        }
+        mouse_consume_byte(inb(0x60));
     }
-
-    uint8_t data = inb(0x60);
-    if (packet_index == 0 && (data & 0x08u) == 0) {
-        return;
-    }
-    packet[packet_index++] = data;
-    if (packet_index < 3) {
-        return;
-    }
-    packet_index = 0;
-
-    if (packet[0] & 0xC0u) {
-        return;
-    }
-
-    int8_t dx = (int8_t)packet[1];
-    int8_t dy = (int8_t)packet[2];
-
-    int mx = invert_x ? -(int)dx : (int)dx;
-    int my = invert_y ? (int)dy : -(int)dy;
-    int mag = abs_i(mx) + abs_i(my);
-
-    mx = accel_delta(mx, mag);
-    my = accel_delta(my, mag);
-
-    raw_x = clamp_coord(raw_x + mx, limit_x);
-    raw_y = clamp_coord(raw_y + my, limit_y);
-
-    g_mouse.left = (packet[0] & 0x1) != 0;
-    g_mouse.right = (packet[0] & 0x2) != 0;
-    g_mouse.middle = (packet[0] & 0x4) != 0;
 }
 
 mouse_state_t mouse_get_state(void) {
@@ -182,21 +188,19 @@ mouse_state_t mouse_get_state(void) {
     int dist_y = abs_i(target_y_fp - smooth_y_fp) >> MOUSE_FP_SHIFT;
     int dist = dist_x > dist_y ? dist_x : dist_y;
 
-    int alpha = 238;
-    if (dist > 14) {
+    int alpha = 248;
+    if (dist > 20) {
         alpha = 255;
-    } else if (dist > 8) {
+    } else if (dist > 10) {
+        alpha = 252;
+    } else if (dist > 4) {
         alpha = 250;
-    } else if (dist > 3) {
-        alpha = 244;
-    } else if (dist <= 1) {
-        alpha = 212;
     }
     if (g_mouse.left || g_mouse.right || g_mouse.middle) {
-        alpha = 252;
+        alpha = 255;
     }
 
-    if (dist <= 1) {
+    if (dist <= 2) {
         smooth_x_fp = target_x_fp;
         smooth_y_fp = target_y_fp;
     } else {

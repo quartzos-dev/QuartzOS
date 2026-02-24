@@ -6,6 +6,7 @@
 #include <kernel/secure_store.h>
 #include <lib/string.h>
 #include <memory/heap.h>
+#include <net/net.h>
 #include <stdint.h>
 
 #define LICENSE_DB_PATH "/etc/licenses.db"
@@ -26,6 +27,7 @@
 #define LICENSE_LOCKOUT_TICKS (120u * LICENSE_HZ)
 #define LICENSE_MAX_FAILS 3u
 #define LICENSE_TERMS_MAX_BYTES (256u * 1024u)
+#define LICENSE_SERVER_VERIFY_CACHE_TICKS (60u * LICENSE_HZ)
 
 #define LICENSE_POLICY_SUBSCRIPTION 0x40u
 
@@ -95,6 +97,8 @@ static license_error_t g_last_error = LICENSE_ERR_NONE;
 static int g_terms_available;
 static int g_terms_accepted;
 static char g_terms_hash[65];
+static uint64_t g_server_verify_tick;
+static int g_server_verify_ok;
 
 static int version_allowed(key_version_t version) {
     if (!LICENSE_REQUIRE_MODERN_ACTIVATION) {
@@ -969,6 +973,8 @@ static void clear_active_key(void) {
     g_active_key[0] = '\0';
     g_active_tier_code = 0;
     g_active_policy_bits = 0;
+    g_server_verify_tick = 0;
+    g_server_verify_ok = 0;
 }
 
 static void clear_failures(void) {
@@ -997,6 +1003,72 @@ static void record_activation_failure(license_error_t err, const char *detail, i
     }
 
     audit_log("LICENSE_ACTIVATE_FAIL", detail ? detail : "unknown");
+}
+
+static int verify_key_with_server_db(const char *key, license_error_t *out_error, const char **out_detail) {
+    if (out_error) {
+        *out_error = LICENSE_ERR_NONE;
+    }
+    if (out_detail) {
+        *out_detail = "none";
+    }
+
+    if (!security_server_license_verify(key, 0, 0)) {
+        if (!net_available()) {
+            if (out_error) {
+                *out_error = LICENSE_ERR_SERVER_UNREACHABLE;
+            }
+            if (out_detail) {
+                *out_detail = "server-unreachable";
+            }
+        } else {
+            if (out_error) {
+                *out_error = LICENSE_ERR_SERVER_REJECTED;
+            }
+            if (out_detail) {
+                *out_detail = "server-rejected";
+            }
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int refresh_active_server_verification(void) {
+    if (!g_active) {
+        return 0;
+    }
+    if (!security_feature_enabled(SECURITY_FEATURE_REMOTE_LICENSE_REQUIRED)) {
+        g_server_verify_ok = 1;
+        g_server_verify_tick = now_ticks();
+        return 1;
+    }
+
+    uint64_t now = now_ticks();
+    if (!g_server_verify_ok &&
+        g_server_verify_tick != 0 &&
+        (now - g_server_verify_tick) < (10u * LICENSE_HZ)) {
+        return 0;
+    }
+    if (g_server_verify_ok &&
+        g_server_verify_tick != 0 &&
+        (now - g_server_verify_tick) < LICENSE_SERVER_VERIFY_CACHE_TICKS) {
+        return 1;
+    }
+
+    license_error_t server_err = LICENSE_ERR_SERVER_REJECTED;
+    const char *detail = "server-rejected";
+    if (!verify_key_with_server_db(g_active_key, &server_err, &detail)) {
+        g_server_verify_ok = 0;
+        g_server_verify_tick = now;
+        g_last_error = server_err;
+        audit_log("LICENSE_SERVER_VERIFY_FAIL", detail);
+        return 0;
+    }
+
+    g_server_verify_ok = 1;
+    g_server_verify_tick = now;
+    return 1;
 }
 
 static void load_registry(void) {
@@ -1151,6 +1223,8 @@ void license_init(void) {
     g_terms_available = 0;
     g_terms_accepted = 0;
     g_terms_hash[0] = '\0';
+    g_server_verify_tick = 0;
+    g_server_verify_ok = 0;
 
     load_registry();
     load_revocations();
@@ -1167,7 +1241,8 @@ void license_reload(void) {
 
     if (g_active &&
         (!key_is_registered(g_active_key, g_active_key_len) ||
-         key_is_revoked(g_active_key, g_active_key_len))) {
+         key_is_revoked(g_active_key, g_active_key_len) ||
+         !refresh_active_server_verification())) {
         audit_log("LICENSE", "active key revoked or removed");
         license_deactivate();
     }
@@ -1255,8 +1330,18 @@ bool license_activate(const char *key) {
         record_activation_failure(LICENSE_ERR_MINIMUM_TIER, "minimum-tier", 1);
         return false;
     }
+    if (security_feature_enabled(SECURITY_FEATURE_REMOTE_LICENSE_REQUIRED)) {
+        license_error_t server_err = LICENSE_ERR_SERVER_REJECTED;
+        const char *detail = "server-rejected";
+        if (!verify_key_with_server_db(normalized, &server_err, &detail)) {
+            record_activation_failure(server_err, detail, 1);
+            return false;
+        }
+    }
 
     set_active_key(normalized, key_len);
+    g_server_verify_ok = 1;
+    g_server_verify_tick = now_ticks();
     write_state_value(normalized);
     clear_failures();
     g_last_error = LICENSE_ERR_NONE;
@@ -1286,6 +1371,12 @@ bool license_is_active(void) {
         clear_active_key();
         write_state_value("NONE");
         audit_log("LICENSE_AUTO_DEACTIVATE", "minimum-tier");
+        return false;
+    }
+    if (!refresh_active_server_verification()) {
+        clear_active_key();
+        write_state_value("NONE");
+        audit_log("LICENSE_AUTO_DEACTIVATE", "server-db-verify");
         return false;
     }
     return true;
@@ -1411,6 +1502,8 @@ const char *license_error_text(license_error_t error) {
         case LICENSE_ERR_STATE_TAMPER: return "state-tampered";
         case LICENSE_ERR_LEGACY_DISABLED: return "legacy-key-disabled";
         case LICENSE_ERR_MINIMUM_TIER: return "minimum-tier-required";
+        case LICENSE_ERR_SERVER_UNREACHABLE: return "license-server-unreachable";
+        case LICENSE_ERR_SERVER_REJECTED: return "license-server-rejected";
         default: return "unknown";
     }
 }

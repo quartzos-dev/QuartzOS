@@ -26,6 +26,47 @@ static inline uint16_t pack_color565(uint32_t color) {
                       ((uint16_t)(b >> 3)));
 }
 
+static inline uint32_t bytes_per_pixel(void) {
+    if (g_bpp <= 8) {
+        return 1;
+    }
+    if (g_bpp <= 16) {
+        return 2;
+    }
+    if (g_bpp <= 24) {
+        return 3;
+    }
+    return 4;
+}
+
+static inline void put_pixel_on_surface(uint8_t *surface, uint32_t x, uint32_t y, uint32_t color) {
+    if (!surface || x >= g_width || y >= g_height) {
+        return;
+    }
+
+    uint8_t *row = surface + (size_t)y * g_pitch;
+
+    if (g_bpp == 32) {
+        ((uint32_t *)row)[x] = pack_color32(color);
+        return;
+    }
+
+    if (g_bpp == 24) {
+        uint8_t *px = row + x * 3u;
+        px[0] = (uint8_t)(color & 0xFFu);
+        px[1] = (uint8_t)((color >> 8) & 0xFFu);
+        px[2] = (uint8_t)((color >> 16) & 0xFFu);
+        return;
+    }
+
+    if (g_bpp == 16) {
+        ((uint16_t *)row)[x] = pack_color565(color);
+        return;
+    }
+
+    ((uint32_t *)row)[x] = pack_color32(color);
+}
+
 static const uint8_t font8x8_basic[128][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, {0x7E,0x81,0xA5,0x81,0xBD,0x99,0x81,0x7E},
     {0x7E,0xFF,0xDB,0xFF,0xC3,0xE7,0xFF,0x7E}, {0x6C,0xFE,0xFE,0xFE,0x7C,0x38,0x10,0x00},
@@ -133,6 +174,10 @@ bool fb_enable_backbuffer(void) {
     return true;
 }
 
+bool fb_backbuffer_enabled(void) {
+    return g_back != 0;
+}
+
 void fb_present(void) {
     if (!g_fb || !g_back) {
         return;
@@ -142,6 +187,41 @@ void fb_present(void) {
         return;
     }
     memcpy(g_fb, g_back, bytes);
+}
+
+void fb_present_region(int x, int y, int w, int h) {
+    if (!g_fb || !g_back || w <= 0 || h <= 0) {
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    }
+    if (x1 > (int)g_width) {
+        x1 = (int)g_width;
+    }
+    if (y1 > (int)g_height) {
+        y1 = (int)g_height;
+    }
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    size_t bpp = bytes_per_pixel();
+    size_t row_bytes = (size_t)(x1 - x0) * bpp;
+    for (int py = y0; py < y1; py++) {
+        uint8_t *dst = g_fb + (size_t)py * g_pitch + (size_t)x0 * bpp;
+        uint8_t *src = g_back + (size_t)py * g_pitch + (size_t)x0 * bpp;
+        memcpy(dst, src, row_bytes);
+    }
 }
 
 uint32_t fb_width(void) {
@@ -156,29 +236,14 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     if (!g_fb || x >= g_width || y >= g_height) {
         return;
     }
+    put_pixel_on_surface(fb_surface(), x, y, color);
+}
 
-    uint8_t *surface = fb_surface();
-    uint8_t *row = surface + y * g_pitch;
-
-    if (g_bpp == 32) {
-        ((uint32_t *)row)[x] = pack_color32(color);
+void fb_put_pixel_front(uint32_t x, uint32_t y, uint32_t color) {
+    if (!g_fb || x >= g_width || y >= g_height) {
         return;
     }
-
-    if (g_bpp == 24) {
-        uint8_t *px = row + x * 3u;
-        px[0] = (uint8_t)(color & 0xFFu);
-        px[1] = (uint8_t)((color >> 8) & 0xFFu);
-        px[2] = (uint8_t)((color >> 16) & 0xFFu);
-        return;
-    }
-
-    if (g_bpp == 16) {
-        ((uint16_t *)row)[x] = pack_color565(color);
-        return;
-    }
-
-    ((uint32_t *)row)[x] = pack_color32(color);
+    put_pixel_on_surface(g_fb, x, y, color);
 }
 
 void fb_clear(uint32_t color) {

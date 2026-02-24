@@ -28,6 +28,23 @@
 #define SECURITY_FEATURE_RATE_LIMIT_EVENTS 17u
 #define SECURITY_FEATURE_REQUIRE_MANIFEST 18u
 #define SECURITY_FEATURE_ALLOW_FAILSAFE_RESET 19u
+#define SECURITY_FEATURE_ALLOW_SERVER_CONTROL 20u
+#define SECURITY_FEATURE_ALLOW_SERVER_EXPORT 21u
+#define SECURITY_FEATURE_ALLOW_SERVER_SEND 22u
+#define SECURITY_FEATURE_SERVER_REQUIRE_PRIVATE_ENDPOINT 23u
+#define SECURITY_FEATURE_SERVER_RESTRICT_PRIVILEGED_PORTS 24u
+#define SECURITY_FEATURE_SERVER_RESTRICT_RISKY_PORTS 25u
+#define SECURITY_FEATURE_SERVER_RATE_LIMIT_SEND 26u
+#define SECURITY_FEATURE_SERVER_BLOCK_IN_LOCKDOWN 27u
+#define SECURITY_FEATURE_SERVER_REQUIRE_LICENSE 28u
+#define SECURITY_FEATURE_SERVER_EXPORT_SANDBOX 29u
+#define SECURITY_FEATURE_REMOTE_AV_REQUIRED 30u
+#define SECURITY_FEATURE_REMOTE_LICENSE_REQUIRED 31u
+#define SECURITY_FEATURE_BLOCK_USER_SERVER_ACCESS 32u
+
+#define SECURITY_SERVER_IP 0x0A000202u
+#define SECURITY_SERVER_AV_PORT 9443u
+#define SECURITY_SERVER_LICENSE_PORT 9444u
 
 typedef enum security_mode {
     SECURITY_MODE_NORMAL = 0,
@@ -43,7 +60,8 @@ typedef enum security_event {
     SECURITY_EVENT_LICENSE_BLOCKED = 4,
     SECURITY_EVENT_INTEGRITY_FAIL = 5,
     SECURITY_EVENT_SYSCALL_BLOCKED = 6,
-    SECURITY_EVENT_AUTH_FAIL = 7
+    SECURITY_EVENT_AUTH_FAIL = 7,
+    SECURITY_EVENT_SERVER_BLOCKED = 8
 } security_event_t;
 
 typedef enum security_app_kind {
@@ -79,6 +97,15 @@ bool security_allow_network_ops(void);
 bool security_allow_sys_write(size_t len);
 bool security_allow_app_launch(security_app_kind_t kind, bool wrapped,
                                char *reason, size_t reason_len);
+bool security_allow_server_command(const char *verb, char *reason, size_t reason_len);
+bool security_allow_server_endpoint(uint32_t ip, uint16_t port,
+                                    char *reason, size_t reason_len);
+bool security_allow_server_payload(size_t payload_len, char *reason, size_t reason_len);
+bool security_allow_server_export(const char *path, char *reason, size_t reason_len);
+bool security_server_antivirus_verify(const char *path, const char *sha256_hex,
+                                      char *reason, size_t reason_len);
+bool security_server_license_verify(const char *license_key, char *reason, size_t reason_len);
+bool security_user_server_access_allowed(void);
 
 bool security_verify_integrity_now(char *summary, size_t summary_len);
 uint32_t security_intrusion_threshold(void);

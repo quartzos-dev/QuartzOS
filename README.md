@@ -3,6 +3,13 @@
 QuartzOS is a monolithic 64-bit desktop operating system for x86_64 PCs.
 It boots with Limine (BIOS + UEFI), initializes a custom kernel, mounts a custom filesystem image, runs a CLI shell, and renders a graphical desktop with mouse-driven windows.
 
+## Legal and policy documents
+
+- License agreement: `LICENSE`
+- Terms and conditions: `TERMS_AND_CONDITIONS.md`
+- Security policy: `SECURITY_POLICY.md`
+- Fair use policy: `FAIR_USE_POLICY.md`
+
 ## Kernel architecture
 
 **Kernel type:** Monolithic kernel
@@ -202,6 +209,8 @@ Features:
   `QOS1` (legacy), `QOS2` (HMAC-SHA256/64), and `QOS3` (HMAC-SHA256/96).
 - Runtime activation is restricted to modern `QOS3` keys.
 - Revocation enforcement via `/etc/licenses.revoked`.
+- Remote license verification is enforced in-kernel against the configured
+  server database; activation fails closed if server verification fails.
 - Tamper-evident license state file (HMAC-protected `/etc/license.state`, v2+v3 compatible).
 - EULA acceptance tracking with signed persisted state (`/etc/license.accept`).
 - Terms file hashing and binding (`/etc/LICENSE.txt`) so acceptance resets on terms changes.
@@ -216,6 +225,8 @@ Features:
 - Two automatic failsafes:
   - **Intrusion failsafe:** event-threshold trigger with optional network kill-switch
   - **Integrity failsafe:** boot-time verification of `/etc/security_manifest.txt`
+- Integrity verification includes remote antivirus confirmation of manifest
+  file hashes through the kernel-controlled security channel.
 - Integrity manifest generation in build pipeline (`tools/generate_security_manifest.py`) with SHA-256 hashing of critical files.
 - Hardened shell policy:
   - `run` execution is restricted to `/bin/*` only.
@@ -224,6 +235,8 @@ Features:
   - direct `mkdir` under `/etc`, `/bin`, `/boot` is blocked and audited.
   - direct `cat` on sensitive license files is blocked and audited.
   - privileged shell commands generate audit events (`CMD_PRIVILEGED`).
+  - user-level direct access to the security verification server is blocked;
+    server verification is kernel-only.
 
 ### License system
 - EULA terms file in rootfs: `/etc/LICENSE.txt`.
@@ -369,6 +382,8 @@ sudo dd if=build/quartzos.iso of=/dev/sdX bs=4M status=progress conv=fsync
 - The default `make run` path boots from ISO and attaches `build/quartzos_disk.img` for persistent SFS writes.
 - SMP APs are brought online and run a shared work queue for kernel jobs.
 - Networking includes ARP + IPv4 + ICMP ping + a minimal TCP implementation (echo/listen + active text send).
+- Security-critical remote verification traffic is kernel-managed; shell users
+  cannot directly access server verification endpoints.
 - Before launching apps:
   - `license terms`
   - `license accept`

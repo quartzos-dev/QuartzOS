@@ -1,6 +1,7 @@
 #include <drivers/ata.h>
 #include <drivers/keyboard.h>
 #include <drivers/mouse.h>
+#include <drivers/pit.h>
 #include <filesystem/sfs.h>
 #include <gui/gui.h>
 #include <kernel/app_runtime.h>
@@ -28,6 +29,19 @@ static char line[256];
 static size_t line_len;
 static int g_license_lock_mode;
 static int g_security_lock_mode;
+
+#define SERVER_FEATURE_COUNT 900u
+#define SERVER_USE_CASE_COUNT 5000u
+#define SERVER_FEATURES_PATH "/etc/server.features"
+#define SERVER_EXPORT_DIR "/server"
+#define SERVER_DEFAULT_IDEA_EXPORT "/server/SERVER_USE_CASES_5000.txt"
+#define SERVER_DEFAULT_FEATURE_EXPORT "/server/SERVER_FEATURES_900.txt"
+
+static uint8_t g_server_features[SERVER_FEATURE_COUNT];
+static uint32_t g_server_feature_enabled_count;
+static int g_server_endpoint_ready;
+static uint32_t g_server_ip;
+static uint16_t g_server_port;
 
 static void print_hex_byte(uint8_t value) {
     static const char digits[] = "0123456789abcdef";
@@ -224,6 +238,9 @@ static void sync_license_lock_mode(void) {
     }
     g_license_lock_mode = should_lock;
     if (g_license_lock_mode) {
+        (void)service_stop("gui");
+        (void)service_stop("net");
+        (void)service_set_policy("net", SERVICE_POLICY_MANUAL);
         kprintf("license: enforcement lock enabled (consumer monthly license required)\n");
         audit_log("LICENSE_LOCK_MODE", "enabled");
     } else {
@@ -275,7 +292,13 @@ static int command_allowed_in_lock_mode(int argc, char **argv) {
         }
     }
     if (strcmp(argv[0], "security") == 0) {
-        return 1;
+        if (g_security_lock_mode && !g_license_lock_mode) {
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(argv[0], "server") == 0) {
+        return 0;
     }
     return 0;
 }
@@ -316,6 +339,291 @@ static int parse_ipv4(const char *text, uint32_t *out_ip) {
               ((uint32_t)oct[2] << 8) |
               (uint32_t)oct[3];
     return 1;
+}
+
+static void buf_append_text(char *out, size_t out_len, const char *text) {
+    if (!out || out_len == 0 || !text) {
+        return;
+    }
+    size_t cur = strlen(out);
+    if (cur >= out_len - 1u) {
+        return;
+    }
+    strncat(out, text, out_len - cur - 1u);
+}
+
+static void buf_append_u32(char *out, size_t out_len, uint32_t value) {
+    char tmp[16];
+    size_t idx = 0;
+    do {
+        tmp[idx++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    } while (value != 0u && idx < sizeof(tmp));
+    while (idx > 0) {
+        char c[2];
+        c[0] = tmp[idx - 1];
+        c[1] = '\0';
+        buf_append_text(out, out_len, c);
+        idx--;
+    }
+}
+
+static void format_ipv4_text(uint32_t ip, char *out, size_t out_len) {
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    buf_append_u32(out, out_len, (ip >> 24) & 0xFFu);
+    buf_append_text(out, out_len, ".");
+    buf_append_u32(out, out_len, (ip >> 16) & 0xFFu);
+    buf_append_text(out, out_len, ".");
+    buf_append_u32(out, out_len, (ip >> 8) & 0xFFu);
+    buf_append_text(out, out_len, ".");
+    buf_append_u32(out, out_len, ip & 0xFFu);
+}
+
+static void server_feature_name(uint32_t index, char *out, size_t out_len) {
+    static const char *groups[] = {
+        "Ingest", "Backup", "Observability", "Routing", "Security", "Identity", "Storage",
+        "Automation", "Build", "Monitoring", "Compliance", "Analytics", "Recovery",
+        "Replication", "Optimization"
+    };
+    static const char *verbs[] = {
+        "Adaptive", "Secure", "Predictive", "Distributed", "Elastic", "Verified",
+        "RealTime", "Policy", "Snapshot", "Smart", "Isolated", "Resilient"
+    };
+    static const char *nouns[] = {
+        "Pipeline", "Gateway", "Collector", "Scheduler", "Queue", "Mirror", "Archive",
+        "Guard", "Reporter", "Balancer", "Proxy", "Ledger"
+    };
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    uint32_t g = index / 60u;
+    uint32_t local = index % 60u;
+    const char *group = groups[g % (sizeof(groups) / sizeof(groups[0]))];
+    const char *verb = verbs[(local * 7u + g) % (sizeof(verbs) / sizeof(verbs[0]))];
+    const char *noun = nouns[(local * 11u + g * 3u) % (sizeof(nouns) / sizeof(nouns[0]))];
+    buf_append_text(out, out_len, group);
+    buf_append_text(out, out_len, " ");
+    buf_append_text(out, out_len, verb);
+    buf_append_text(out, out_len, " ");
+    buf_append_text(out, out_len, noun);
+}
+
+static void server_use_case_text(uint32_t index, char *out, size_t out_len) {
+    static const char *domains[] = {
+        "CI/CD", "Security", "Backups", "Telemetry", "Assets", "Licensing", "Compliance",
+        "Analytics", "Ops", "DR", "Updates", "Automation", "QA", "Incident", "Monitoring",
+        "Support", "Logs", "Orchestration", "Data", "Build Farm"
+    };
+    static const char *verbs[] = {
+        "stream", "replicate", "archive", "verify", "index", "compress", "score", "snapshot",
+        "audit", "schedule", "triage", "throttle", "sign", "track", "dispatch", "validate",
+        "publish", "route", "inspect", "restore"
+    };
+    static const char *targets[] = {
+        "build artifacts", "license events", "security alerts", "GUI metrics", "kernel traces",
+        "app manifests", "backup blocks", "release bundles", "telemetry frames", "service states",
+        "task snapshots", "network sessions", "cron actions", "config deltas", "integrity reports",
+        "support payloads", "runtime flags", "storage journals", "audit logs", "crash dumps"
+    };
+    static const char *modes[] = {"nightly", "realtime", "staged", "isolated", "read-only"};
+    static const char *outcomes[] = {
+        "faster recovery", "stronger integrity", "lower downtime", "fewer incidents", "stable scaling",
+        "easier audits", "deterministic builds", "improved visibility", "safer rollout", "lower cost"
+    };
+
+    if (!out || out_len == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    const char *domain = domains[(index * 13u + 7u) % (sizeof(domains) / sizeof(domains[0]))];
+    const char *verb = verbs[(index * 17u + 3u) % (sizeof(verbs) / sizeof(verbs[0]))];
+    const char *target = targets[(index * 19u + 11u) % (sizeof(targets) / sizeof(targets[0]))];
+    const char *mode = modes[(index * 5u + 2u) % (sizeof(modes) / sizeof(modes[0]))];
+    const char *outcome = outcomes[(index * 7u + 1u) % (sizeof(outcomes) / sizeof(outcomes[0]))];
+
+    buf_append_u32(out, out_len, index + 1u);
+    buf_append_text(out, out_len, ". ");
+    buf_append_text(out, out_len, "Use server to ");
+    buf_append_text(out, out_len, verb);
+    buf_append_text(out, out_len, " ");
+    buf_append_text(out, out_len, target);
+    buf_append_text(out, out_len, " for ");
+    buf_append_text(out, out_len, domain);
+    buf_append_text(out, out_len, " in ");
+    buf_append_text(out, out_len, mode);
+    buf_append_text(out, out_len, " mode (");
+    buf_append_text(out, out_len, outcome);
+    buf_append_text(out, out_len, ")");
+}
+
+static void server_recount_enabled(void) {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < SERVER_FEATURE_COUNT; i++) {
+        if (g_server_features[i]) {
+            count++;
+        }
+    }
+    g_server_feature_enabled_count = count;
+}
+
+static void server_reset_features_defaults(void) {
+    for (uint32_t i = 0; i < SERVER_FEATURE_COUNT; i++) {
+        g_server_features[i] = ((i % 4u) == 0u || (i % 9u) == 0u) ? 1u : 0u;
+    }
+    server_recount_enabled();
+}
+
+static bool server_save_features(void) {
+    char out[SERVER_FEATURE_COUNT + 2];
+    for (uint32_t i = 0; i < SERVER_FEATURE_COUNT; i++) {
+        out[i] = g_server_features[i] ? '1' : '0';
+    }
+    out[SERVER_FEATURE_COUNT] = '\n';
+    out[SERVER_FEATURE_COUNT + 1] = '\0';
+    return sfs_write_file(SERVER_FEATURES_PATH, out, SERVER_FEATURE_COUNT + 1u);
+}
+
+static void server_load_features(void) {
+    char in[SERVER_FEATURE_COUNT + 8];
+    size_t read = 0;
+    if (!sfs_read_file(SERVER_FEATURES_PATH, in, sizeof(in), &read) || read < SERVER_FEATURE_COUNT) {
+        server_reset_features_defaults();
+        return;
+    }
+    for (uint32_t i = 0; i < SERVER_FEATURE_COUNT; i++) {
+        g_server_features[i] = (in[i] == '1') ? 1u : 0u;
+    }
+    server_recount_enabled();
+}
+
+static void server_load_endpoint(void) {
+    const char *ip_text = config_get("server.endpoint_ip");
+    const char *port_text = config_get("server.endpoint_port");
+    uint32_t ip = 0;
+    uint32_t port_u32 = 0;
+
+    g_server_endpoint_ready = 0;
+    g_server_ip = 0;
+    g_server_port = 0;
+    if (!ip_text || !port_text) {
+        return;
+    }
+    if (!parse_ipv4(ip_text, &ip) || !parse_u32_text(port_text, &port_u32)) {
+        return;
+    }
+    if (port_u32 == 0 || port_u32 > 65535u) {
+        return;
+    }
+    g_server_ip = ip;
+    g_server_port = (uint16_t)port_u32;
+    g_server_endpoint_ready = 1;
+}
+
+static bool server_save_endpoint(void) {
+    if (!g_server_endpoint_ready) {
+        (void)config_unset("server.endpoint_ip");
+        (void)config_unset("server.endpoint_port");
+        return config_save();
+    }
+
+    char ip_text[24];
+    char port_text[8];
+    ip_text[0] = '\0';
+    port_text[0] = '\0';
+    format_ipv4_text(g_server_ip, ip_text, sizeof(ip_text));
+    buf_append_u32(port_text, sizeof(port_text), (uint32_t)g_server_port);
+
+    if (!config_set("server.endpoint_ip", ip_text) ||
+        !config_set("server.endpoint_port", port_text)) {
+        return false;
+    }
+    return config_save();
+}
+
+static bool server_send_payload(const char *payload, char *reason, size_t reason_len) {
+    if (reason && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    if (!payload || !payload[0]) {
+        if (reason && reason_len > 0) {
+            buf_append_text(reason, reason_len, "empty payload");
+        }
+        return false;
+    }
+    if (!g_server_endpoint_ready) {
+        if (reason && reason_len > 0) {
+            buf_append_text(reason, reason_len, "endpoint not configured");
+        }
+        return false;
+    }
+    if (!security_allow_server_payload(strlen(payload), reason, reason_len)) {
+        return false;
+    }
+    if (!net_available()) {
+        if (reason && reason_len > 0) {
+            buf_append_text(reason, reason_len, "network unavailable");
+        }
+        return false;
+    }
+    return net_tcp_send_text(g_server_ip, g_server_port, payload);
+}
+
+static bool server_export_catalog(const char *path, int ideas_mode) {
+    const char *dst = path && path[0] ? path : (ideas_mode ? SERVER_DEFAULT_IDEA_EXPORT : SERVER_DEFAULT_FEATURE_EXPORT);
+    if (!dst || dst[0] != '/') {
+        return false;
+    }
+
+    if (!sfs_exists(SERVER_EXPORT_DIR)) {
+        (void)sfs_make_dir(SERVER_EXPORT_DIR);
+    }
+
+    size_t max_lines = ideas_mode ? (size_t)SERVER_USE_CASE_COUNT : (size_t)SERVER_FEATURE_COUNT;
+    size_t cap = ideas_mode ? (size_t)SERVER_USE_CASE_COUNT * 144u : (size_t)SERVER_FEATURE_COUNT * 96u;
+    if (cap < 4096u) {
+        cap = 4096u;
+    }
+    char *blob = (char *)kmalloc(cap);
+    if (!blob) {
+        return false;
+    }
+    blob[0] = '\0';
+    size_t used = 0;
+
+    for (size_t i = 0; i < max_lines; i++) {
+        char line_buf[192];
+        line_buf[0] = '\0';
+        if (ideas_mode) {
+            server_use_case_text((uint32_t)i, line_buf, sizeof(line_buf));
+        } else {
+            char name[96];
+            name[0] = '\0';
+            server_feature_name((uint32_t)i, name, sizeof(name));
+            buf_append_u32(line_buf, sizeof(line_buf), (uint32_t)(i + 1u));
+            buf_append_text(line_buf, sizeof(line_buf), ". ");
+            buf_append_text(line_buf, sizeof(line_buf), name);
+            buf_append_text(line_buf, sizeof(line_buf), " : ");
+            buf_append_text(line_buf, sizeof(line_buf), g_server_features[i] ? "on" : "off");
+        }
+        size_t line_len = strlen(line_buf);
+        if (used + line_len + 1u >= cap) {
+            kfree(blob);
+            return false;
+        }
+        memcpy(blob + used, line_buf, line_len);
+        used += line_len;
+        blob[used++] = '\n';
+        blob[used] = '\0';
+    }
+
+    bool ok = sfs_write_file(dst, blob, used);
+    kfree(blob);
+    return ok;
 }
 
 static void print_prompt(void) {
@@ -439,6 +747,15 @@ static int path_equals(const char *a, const char *b) {
     return a && b && strcmp(a, b) == 0;
 }
 
+static int config_key_is_server_restricted(const char *key) {
+    if (!key) {
+        return 0;
+    }
+    return strncmp(key, "server.", 7) == 0 ||
+           strncmp(key, "license.server.", 15) == 0 ||
+           strncmp(key, "security.server.", 16) == 0;
+}
+
 static int path_is_security_protected(const char *path) {
     if (!path || path[0] != '/') {
         return 0;
@@ -449,6 +766,9 @@ static int path_is_security_protected(const char *path) {
     }
 
     if (path_has_prefix(path, "/etc/licenses")) {
+        return 1;
+    }
+    if (path_equals(path, SERVER_FEATURES_PATH)) {
         return 1;
     }
 
@@ -478,6 +798,9 @@ static int path_is_sensitive_read(const char *path) {
     if (path_has_prefix(path, "/etc/licenses")) {
         return 1;
     }
+    if (path_equals(path, SERVER_FEATURES_PATH)) {
+        return 1;
+    }
     return path_equals(path, "/etc/license.state") ||
            path_equals(path, "/etc/license.accept") ||
            path_equals(path, "/etc/licenses.db") ||
@@ -500,6 +823,7 @@ static int command_is_privileged(const char *cmd) {
            strcmp(cmd, "log") == 0 ||
            strcmp(cmd, "boot") == 0 ||
            strcmp(cmd, "security") == 0 ||
+           strcmp(cmd, "server") == 0 ||
            strcmp(cmd, "diskread") == 0;
 }
 
@@ -597,6 +921,7 @@ static void cmd_help(void) {
         kprintf("  security status    Show security posture\n");
         kprintf("  security verify    Re-run integrity checks\n");
         kprintf("  security failsafe ...  Inspect/reset failsafes\n");
+        kprintf("  server ...         Kernel-only (user access disabled)\n");
         return;
     }
 
@@ -630,6 +955,7 @@ static void cmd_help(void) {
     kprintf("  cron ...           Cron scheduler controls\n");
     kprintf("  config ...         Configuration database tools\n");
     kprintf("  security ...       Security policy, features, and failsafes\n");
+    kprintf("  server ...         Kernel-only (user access disabled)\n");
     kprintf("  boot ...           Boot profile controls\n");
     kprintf("  mutex stats        Mutex contention statistics\n");
     kprintf("  mouse ...          Mouse settings/status\n");
@@ -661,6 +987,12 @@ static void execute_line(char *input) {
     }
     if (command_is_privileged(argv[0])) {
         audit_log("CMD_PRIVILEGED", argv[0]);
+    }
+
+    if (strcmp(argv[0], "server") == 0) {
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "user-server-cmd");
+        kprintf("server: access denied. kernel-managed security channel.\n");
+        return;
     }
 
     if (strcmp(argv[0], "help") == 0) {
@@ -736,6 +1068,12 @@ static void execute_line(char *input) {
                     (unsigned)security_recent_suspicious_events(),
                     (unsigned)security_integrity_checked_entries(),
                     (unsigned)security_integrity_failure_count());
+            kprintf("security: server control=%s send=%s export=%s private-endpoint=%s sandbox=%s\n",
+                    security_feature_enabled(SECURITY_FEATURE_ALLOW_SERVER_CONTROL) ? "on" : "off",
+                    security_feature_enabled(SECURITY_FEATURE_ALLOW_SERVER_SEND) ? "on" : "off",
+                    security_feature_enabled(SECURITY_FEATURE_ALLOW_SERVER_EXPORT) ? "on" : "off",
+                    security_feature_enabled(SECURITY_FEATURE_SERVER_REQUIRE_PRIVATE_ENDPOINT) ? "on" : "off",
+                    security_feature_enabled(SECURITY_FEATURE_SERVER_EXPORT_SANDBOX) ? "on" : "off");
             return;
         }
 
@@ -1494,12 +1832,51 @@ static void execute_line(char *input) {
             if (n == 0) {
                 kprintf("config: empty\n");
             } else {
-                kprintf("%s", buf);
+                size_t pos = 0;
+                int printed = 0;
+                while (pos < n && buf[pos] != '\0') {
+                    size_t start = pos;
+                    while (pos < n && buf[pos] != '\n' && buf[pos] != '\0') {
+                        pos++;
+                    }
+                    size_t end = pos;
+                    if (pos < n && buf[pos] == '\n') {
+                        pos++;
+                    }
+                    if (end <= start) {
+                        continue;
+                    }
+                    char line[256];
+                    size_t len = end - start;
+                    if (len >= sizeof(line)) {
+                        continue;
+                    }
+                    memcpy(line, buf + start, len);
+                    line[len] = '\0';
+                    char *eq = strchr(line, '=');
+                    if (eq) {
+                        *eq = '\0';
+                        if (config_key_is_server_restricted(line)) {
+                            continue;
+                        }
+                        *eq = '=';
+                    }
+                    kprintf("%s\n", line);
+                    printed = 1;
+                }
+                if (!printed) {
+                    kprintf("config: empty\n");
+                }
             }
             kfree(buf);
             return;
         }
         if (argc >= 3 && strcmp(argv[1], "get") == 0) {
+            if (config_key_is_server_restricted(argv[2])) {
+                security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "config-get-server-key");
+                kprintf("config: key restricted\n");
+                return;
+            }
             const char *value = config_get(argv[2]);
             if (!value) {
                 kprintf("config: key not found\n");
@@ -1509,6 +1886,11 @@ static void execute_line(char *input) {
             return;
         }
         if (argc >= 4 && strcmp(argv[1], "set") == 0) {
+            if (config_key_is_server_restricted(argv[2])) {
+                security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "config-set-server-key");
+                kprintf("config: key restricted\n");
+                return;
+            }
             char value[256];
             value[0] = '\0';
             for (int i = 3; i < argc; i++) {
@@ -1525,6 +1907,11 @@ static void execute_line(char *input) {
             return;
         }
         if (argc >= 3 && strcmp(argv[1], "unset") == 0) {
+            if (config_key_is_server_restricted(argv[2])) {
+                security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "config-unset-server-key");
+                kprintf("config: key restricted\n");
+                return;
+            }
             if (!config_unset(argv[2])) {
                 kprintf("config: unset failed\n");
                 return;
@@ -1881,6 +2268,11 @@ static void execute_line(char *input) {
             kprintf("ping: invalid ip\n");
             return;
         }
+        if (ip == SECURITY_SERVER_IP) {
+            security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "ping-server-ip");
+            kprintf("ping: destination restricted\n");
+            return;
+        }
         if (net_ping(ip)) {
             kprintf("ping: reply from %s\n", argv[1]);
         } else {
@@ -1929,6 +2321,11 @@ static void execute_line(char *input) {
             kprintf("tcpsend: invalid ip\n");
             return;
         }
+        if (ip == SECURITY_SERVER_IP) {
+            security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "tcpsend-server-ip");
+            kprintf("tcpsend: destination restricted\n");
+            return;
+        }
         int port = 0;
         for (const char *p = argv[2]; *p; p++) {
             if (*p < '0' || *p > '9') {
@@ -1956,6 +2353,337 @@ static void execute_line(char *input) {
         } else {
             kprintf("tcpsend: failed\n");
         }
+        return;
+    }
+
+    if (strcmp(argv[0], "server") == 0) {
+        if (argc == 1 || strcmp(argv[1], "status") == 0) {
+            char endpoint_text[40];
+            endpoint_text[0] = '\0';
+            if (g_server_endpoint_ready) {
+                format_ipv4_text(g_server_ip, endpoint_text, sizeof(endpoint_text));
+                buf_append_text(endpoint_text, sizeof(endpoint_text), ":");
+                buf_append_u32(endpoint_text, sizeof(endpoint_text), (uint32_t)g_server_port);
+            } else {
+                buf_append_text(endpoint_text, sizeof(endpoint_text), "unset");
+            }
+            kprintf("server: endpoint=%s features=%u/%u ideas=%u net=%s security-net=%s\n",
+                    endpoint_text,
+                    (unsigned)g_server_feature_enabled_count,
+                    (unsigned)SERVER_FEATURE_COUNT,
+                    (unsigned)SERVER_USE_CASE_COUNT,
+                    net_available() ? "up" : "down",
+                    security_allow_network_ops() ? "allow" : "blocked");
+            return;
+        }
+
+        if (strcmp(argv[1], "endpoint") == 0) {
+            if (argc == 3 && strcmp(argv[2], "clear") == 0) {
+                char deny_reason[128];
+                if (!security_allow_server_command("endpoint", deny_reason, sizeof(deny_reason))) {
+                    kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                    return;
+                }
+                g_server_endpoint_ready = 0;
+                g_server_ip = 0;
+                g_server_port = 0;
+                if (!server_save_endpoint()) {
+                    kprintf("server: endpoint clear failed\n");
+                    return;
+                }
+                audit_log("SERVER_ENDPOINT", "cleared");
+                kprintf("server: endpoint cleared\n");
+                return;
+            }
+            if (argc < 4) {
+                kprintf("server: usage server endpoint <ip> <port>\n");
+                kprintf("server: usage server endpoint clear\n");
+                return;
+            }
+            uint32_t ip = 0;
+            uint32_t port = 0;
+            if (!parse_ipv4(argv[2], &ip) || !parse_u32_text(argv[3], &port) || port == 0 || port > 65535u) {
+                kprintf("server: invalid endpoint\n");
+                return;
+            }
+            char deny_reason[128];
+            if (!security_allow_server_endpoint(ip, (uint16_t)port, deny_reason, sizeof(deny_reason))) {
+                kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                return;
+            }
+            g_server_ip = ip;
+            g_server_port = (uint16_t)port;
+            g_server_endpoint_ready = 1;
+            if (!server_save_endpoint()) {
+                kprintf("server: endpoint save failed\n");
+                return;
+            }
+            audit_log("SERVER_ENDPOINT", "updated");
+            kprintf("server: endpoint set to %s:%u\n", argv[2], (unsigned)g_server_port);
+            return;
+        }
+
+        if (strcmp(argv[1], "ping") == 0) {
+            if (!g_server_endpoint_ready) {
+                kprintf("server: set endpoint first\n");
+                return;
+            }
+            char payload[160];
+            payload[0] = '\0';
+            buf_append_text(payload, sizeof(payload), "QOS_SERVER_PING uptime_ticks=");
+            buf_append_u32(payload, sizeof(payload), (uint32_t)pit_ticks());
+            buf_append_text(payload, sizeof(payload), " features=");
+            buf_append_u32(payload, sizeof(payload), g_server_feature_enabled_count);
+            char send_reason[128];
+            if (server_send_payload(payload, send_reason, sizeof(send_reason))) {
+                audit_log("SERVER_PING", "sent");
+                kprintf("server: ping sent\n");
+            } else {
+                kprintf("server: ping failed (%s)\n", send_reason[0] ? send_reason : "unknown");
+            }
+            return;
+        }
+
+        if (strcmp(argv[1], "send") == 0) {
+            if (argc < 3) {
+                kprintf("server: usage server send <text>\n");
+                return;
+            }
+            char payload[512];
+            payload[0] = '\0';
+            for (int i = 2; i < argc; i++) {
+                if (i > 2) {
+                    buf_append_text(payload, sizeof(payload), " ");
+                }
+                buf_append_text(payload, sizeof(payload), argv[i]);
+            }
+            char send_reason[128];
+            if (!server_send_payload(payload, send_reason, sizeof(send_reason))) {
+                kprintf("server: send failed (%s)\n", send_reason[0] ? send_reason : "unknown");
+                return;
+            }
+            audit_log("SERVER_SEND", "ok");
+            kprintf("server: sent\n");
+            return;
+        }
+
+        if (strcmp(argv[1], "sync") == 0) {
+            if (!g_server_endpoint_ready) {
+                kprintf("server: set endpoint first\n");
+                return;
+            }
+            char payload[196];
+            payload[0] = '\0';
+            buf_append_text(payload, sizeof(payload), "QOS_SERVER_SYNC enabled=");
+            buf_append_u32(payload, sizeof(payload), g_server_feature_enabled_count);
+            buf_append_text(payload, sizeof(payload), " total=");
+            buf_append_u32(payload, sizeof(payload), SERVER_FEATURE_COUNT);
+            buf_append_text(payload, sizeof(payload), " ideas=");
+            buf_append_u32(payload, sizeof(payload), SERVER_USE_CASE_COUNT);
+            buf_append_text(payload, sizeof(payload), " uptime_ticks=");
+            buf_append_u32(payload, sizeof(payload), (uint32_t)pit_ticks());
+            char send_reason[128];
+            if (!server_send_payload(payload, send_reason, sizeof(send_reason))) {
+                kprintf("server: sync failed (%s)\n", send_reason[0] ? send_reason : "unknown");
+                return;
+            }
+            audit_log("SERVER_SYNC", "ok");
+            kprintf("server: sync sent\n");
+            return;
+        }
+
+        if (strcmp(argv[1], "features") == 0) {
+            if (argc >= 3 && strcmp(argv[2], "save") == 0) {
+                char deny_reason[128];
+                if (!security_allow_server_command("features-save", deny_reason, sizeof(deny_reason))) {
+                    kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                    return;
+                }
+                if (!server_save_features()) {
+                    kprintf("server: feature save failed\n");
+                    return;
+                }
+                audit_log("SERVER_FEATURES", "saved");
+                kprintf("server: features saved\n");
+                return;
+            }
+            if (argc >= 3 && strcmp(argv[2], "load") == 0) {
+                char deny_reason[128];
+                if (!security_allow_server_command("features-load", deny_reason, sizeof(deny_reason))) {
+                    kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                    return;
+                }
+                server_load_features();
+                audit_log("SERVER_FEATURES", "loaded");
+                kprintf("server: features loaded (%u/%u enabled)\n",
+                        (unsigned)g_server_feature_enabled_count,
+                        (unsigned)SERVER_FEATURE_COUNT);
+                return;
+            }
+            if (argc >= 3 && strcmp(argv[2], "reset") == 0) {
+                char deny_reason[128];
+                if (!security_allow_server_command("features-reset", deny_reason, sizeof(deny_reason))) {
+                    kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                    return;
+                }
+                server_reset_features_defaults();
+                audit_log("SERVER_FEATURES", "reset");
+                kprintf("server: features reset (%u/%u enabled)\n",
+                        (unsigned)g_server_feature_enabled_count,
+                        (unsigned)SERVER_FEATURE_COUNT);
+                return;
+            }
+            uint32_t page = 1;
+            if (argc >= 3 && !parse_u32_text(argv[2], &page)) {
+                kprintf("server: usage server features [page|save|load|reset]\n");
+                return;
+            }
+            if (page == 0) {
+                page = 1;
+            }
+            uint32_t per_page = 20;
+            uint32_t total = SERVER_FEATURE_COUNT;
+            uint32_t pages = (total + per_page - 1u) / per_page;
+            if (page > pages) {
+                page = pages;
+            }
+            uint32_t start = (page - 1u) * per_page;
+            uint32_t end = start + per_page;
+            if (end > total) {
+                end = total;
+            }
+            kprintf("server features page %u/%u (%u/%u enabled):\n",
+                    (unsigned)page,
+                    (unsigned)pages,
+                    (unsigned)g_server_feature_enabled_count,
+                    (unsigned)SERVER_FEATURE_COUNT);
+            for (uint32_t i = start; i < end; i++) {
+                char name[96];
+                name[0] = '\0';
+                server_feature_name(i, name, sizeof(name));
+                kprintf("  %u [%s] %s\n", (unsigned)(i + 1u), g_server_features[i] ? "on " : "off", name);
+            }
+            return;
+        }
+
+        if (strcmp(argv[1], "feature") == 0) {
+            if (argc < 4) {
+                kprintf("server: usage server feature <id> <on|off|toggle>\n");
+                return;
+            }
+            char deny_reason[128];
+            if (!security_allow_server_command("feature-toggle", deny_reason, sizeof(deny_reason))) {
+                kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                return;
+            }
+            uint32_t id = 0;
+            if (!parse_u32_text(argv[2], &id) || id == 0 || id > SERVER_FEATURE_COUNT) {
+                kprintf("server: invalid feature id\n");
+                return;
+            }
+            uint32_t idx = id - 1u;
+            if (strcmp(argv[3], "toggle") == 0) {
+                g_server_features[idx] = g_server_features[idx] ? 0u : 1u;
+            } else {
+                int on = 0;
+                if (!parse_on_off(argv[3], &on)) {
+                    kprintf("server: usage server feature <id> <on|off|toggle>\n");
+                    return;
+                }
+                g_server_features[idx] = on ? 1u : 0u;
+            }
+            server_recount_enabled();
+            kprintf("server: feature %u=%s\n", (unsigned)id, g_server_features[idx] ? "on" : "off");
+            return;
+        }
+
+        if (strcmp(argv[1], "ideas") == 0) {
+            uint32_t page = 1;
+            if (argc >= 3 && !parse_u32_text(argv[2], &page)) {
+                kprintf("server: usage server ideas [page]\n");
+                return;
+            }
+            if (page == 0) {
+                page = 1;
+            }
+            uint32_t per_page = 25;
+            uint32_t total = SERVER_USE_CASE_COUNT;
+            uint32_t pages = (total + per_page - 1u) / per_page;
+            if (page > pages) {
+                page = pages;
+            }
+            uint32_t start = (page - 1u) * per_page;
+            uint32_t end = start + per_page;
+            if (end > total) {
+                end = total;
+            }
+            kprintf("server use-cases page %u/%u:\n", (unsigned)page, (unsigned)pages);
+            for (uint32_t i = start; i < end; i++) {
+                char line_buf[192];
+                line_buf[0] = '\0';
+                server_use_case_text(i, line_buf, sizeof(line_buf));
+                kprintf("  %s\n", line_buf);
+            }
+            return;
+        }
+
+        if (strcmp(argv[1], "export") == 0) {
+            if (argc < 3) {
+                kprintf("server: usage server export <ideas|features> [path]\n");
+                return;
+            }
+            int ideas_mode = 0;
+            if (strcmp(argv[2], "ideas") == 0) {
+                ideas_mode = 1;
+            } else if (strcmp(argv[2], "features") == 0) {
+                ideas_mode = 0;
+            } else {
+                kprintf("server: usage server export <ideas|features> [path]\n");
+                return;
+            }
+
+            const char *target = 0;
+            char resolved[256];
+            if (argc >= 4) {
+                if (!path_resolve(argv[3], resolved, sizeof(resolved))) {
+                    kprintf("server: invalid export path\n");
+                    return;
+                }
+                if (path_is_security_protected(resolved)) {
+                    kprintf("server: export path protected\n");
+                    return;
+                }
+                target = resolved;
+            }
+            {
+                const char *effective = target ? target : (ideas_mode ? SERVER_DEFAULT_IDEA_EXPORT : SERVER_DEFAULT_FEATURE_EXPORT);
+                char deny_reason[128];
+                if (!security_allow_server_export(effective, deny_reason, sizeof(deny_reason))) {
+                    kprintf("server: blocked (%s)\n", deny_reason[0] ? deny_reason : "policy");
+                    return;
+                }
+            }
+            if (!server_export_catalog(target, ideas_mode)) {
+                kprintf("server: export failed\n");
+                return;
+            }
+            kprintf("server: export ok -> %s\n",
+                    target ? target : (ideas_mode ? SERVER_DEFAULT_IDEA_EXPORT : SERVER_DEFAULT_FEATURE_EXPORT));
+            return;
+        }
+
+        kprintf("server commands:\n");
+        kprintf("  server status\n");
+        kprintf("  server endpoint <ip> <port>\n");
+        kprintf("  server endpoint clear\n");
+        kprintf("  server ping\n");
+        kprintf("  server send <text>\n");
+        kprintf("  server sync\n");
+        kprintf("  server features [page]\n");
+        kprintf("  server features save|load|reset\n");
+        kprintf("  server feature <id> <on|off|toggle>\n");
+        kprintf("  server ideas [page]\n");
+        kprintf("  server export <ideas|features> [path]\n");
         return;
     }
 
@@ -2083,6 +2811,8 @@ void shell_init(void) {
     line[0] = '\0';
     g_license_lock_mode = license_usage_allowed() ? 0 : 1;
     g_security_lock_mode = security_lockdown_active() ? 1 : 0;
+    server_load_endpoint();
+    server_load_features();
     if (g_license_lock_mode || g_security_lock_mode) {
         if (g_license_lock_mode) {
             kprintf("QuartzOS shell ready (LICENSE LOCK mode).\n");

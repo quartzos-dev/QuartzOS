@@ -6,11 +6,12 @@
 #include <kernel/app_runtime.h>
 #include <kernel/console.h>
 #include <kernel/license.h>
+#include <kernel/security.h>
 #include <lib/string.h>
 #include <memory/heap.h>
 #include <net/net.h>
 
-#define MAX_WINDOWS 4
+#define MAX_WINDOWS 5
 #define FEATURE_CATEGORY_COUNT 12
 #define FEATURES_PER_CATEGORY 80
 #define FEATURE_TOTAL (FEATURE_CATEGORY_COUNT * FEATURES_PER_CATEGORY)
@@ -53,7 +54,8 @@ typedef enum window_kind {
     WINDOW_MONITOR = 0,
     WINDOW_TERMINAL = 1,
     WINDOW_FILES = 2,
-    WINDOW_NETWORK = 3
+    WINDOW_NETWORK = 3,
+    WINDOW_SECURITY = 4
 } window_kind_t;
 
 typedef struct window {
@@ -89,12 +91,13 @@ enum {
     START_ACTION_TERMINAL = 1,
     START_ACTION_FILES = 2,
     START_ACTION_NETWORK = 3,
-    START_ACTION_OPEN_LAUNCHER = 4,
-    START_ACTION_OPEN_FEATURE_HUB = 5,
-    START_ACTION_OPEN_QUICK_PANEL = 6,
-    START_ACTION_OVERLAY = 7,
-    START_ACTION_RESTORE_ALL = 8,
-    START_ACTION_CLOSE_ALL = 9
+    START_ACTION_SECURITY = 4,
+    START_ACTION_OPEN_LAUNCHER = 5,
+    START_ACTION_OPEN_FEATURE_HUB = 6,
+    START_ACTION_OPEN_QUICK_PANEL = 7,
+    START_ACTION_OVERLAY = 8,
+    START_ACTION_RESTORE_ALL = 9,
+    START_ACTION_CLOSE_ALL = 10
 };
 
 static const start_item_t start_items[] = {
@@ -105,6 +108,7 @@ static const start_item_t start_items[] = {
     {"Terminal", START_ACTION_TERMINAL},
     {"File Explorer", START_ACTION_FILES},
     {"Network", START_ACTION_NETWORK},
+    {"Security Center", START_ACTION_SECURITY},
     {"Toggle CLI Overlay", START_ACTION_OVERLAY},
     {"Restore All Windows", START_ACTION_RESTORE_ALL},
     {"Close All Windows", START_ACTION_CLOSE_ALL}
@@ -150,6 +154,11 @@ static int mouse_prev_left;
 static int mouse_prev_right;
 static int mouse_prev_x;
 static int mouse_prev_y;
+static int cursor_prev_valid;
+static int cursor_prev_x;
+static int cursor_prev_y;
+static int cursor_prev_w;
+static int cursor_prev_h;
 
 static uint64_t last_frame_tick;
 static uint64_t last_clock_sec;
@@ -1149,8 +1158,21 @@ static void draw_top_bar(int w) {
         chip_x += chip_w + 6;
     }
 
-    int info_x = w - 292;
+    int info_x = w - 448;
     fb_draw_text(info_x, 9, net_available() ? "Online" : "Offline", 0x00bdd3e7, bg);
+    const char *sec_mode = security_mode_name(security_mode());
+    char sec_buf[32];
+    sec_buf[0] = '\0';
+    strncat(sec_buf, "SEC ", sizeof(sec_buf) - strlen(sec_buf) - 1);
+    strncat(sec_buf, sec_mode, sizeof(sec_buf) - strlen(sec_buf) - 1);
+    fb_draw_text(info_x + 54, 9, sec_buf, 0x00f6d4a8, bg);
+    fb_draw_text(
+        info_x + 160,
+        9,
+        (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? "Failsafe ON" : "Failsafe ready",
+        (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? 0x00ffb8b8 : 0x00bfd6ef,
+        bg
+    );
     char feat_buf[24];
     char feat_cnt[8];
     feat_buf[0] = '\0';
@@ -1282,9 +1304,9 @@ static void draw_dock(int w, int h) {
     fb_fill_rect(x + 2, y + 2, dw - 4, 1, 0x00daf0ff);
     fb_fill_rect(x, y + dh - 1, dw, 1, 0x00070d15);
 
-    const uint32_t c0[MAX_WINDOWS] = {0x0046e1ff, 0x00606dff, 0x005edb92, 0x00fd8e4a};
-    const uint32_t c1[MAX_WINDOWS] = {0x002e90ff, 0x00517df2, 0x0047b776, 0x00f55f9f};
-    const uint32_t c2[MAX_WINDOWS] = {0x00235bb8, 0x003f58a8, 0x00388563, 0x008639d4};
+    const uint32_t c0[MAX_WINDOWS] = {0x0046e1ff, 0x00606dff, 0x005edb92, 0x00fd8e4a, 0x00f2d95f};
+    const uint32_t c1[MAX_WINDOWS] = {0x002e90ff, 0x00517df2, 0x0047b776, 0x00f55f9f, 0x00daab39};
+    const uint32_t c2[MAX_WINDOWS] = {0x00235bb8, 0x003f58a8, 0x00388563, 0x008639d4, 0x0090671f};
 
     int ix = x + DOCK_SIDE_PAD;
     int iy = y + (dh - DOCK_ICON_H) / 2;
@@ -1310,11 +1332,15 @@ static void draw_dock(int w, int h) {
         } else if (i == 2) {
             fb_fill_rect(ocx - 7, ocy - 4, 14, 7, 0x00ffffff);
             fb_fill_rect(ocx - 6, ocy - 6, 5, 2, 0x00ffffff);
-        } else {
+        } else if (i == 3) {
             fb_fill_rect(ocx - 6, ocy + 2, 2, 2, 0x00ffffff);
             fb_fill_rect(ocx - 3, ocy, 2, 4, 0x00ffffff);
             fb_fill_rect(ocx, ocy - 2, 2, 6, 0x00ffffff);
             fb_fill_rect(ocx + 3, ocy - 4, 2, 8, 0x00ffffff);
+        } else {
+            fb_fill_rect(ocx - 5, ocy - 5, 10, 10, 0x00ffffff);
+            fb_fill_rect(ocx - 3, ocy - 3, 6, 6, c2[i]);
+            fb_fill_rect(ocx - 1, ocy - 8, 2, 3, 0x00ffffff);
         }
 
         if (running) {
@@ -1867,7 +1893,7 @@ static void draw_quick_panel(void) {
     }
 
     int w = 286;
-    int h = 230;
+    int h = 336;
     int x = (int)fb_width() - w - 16;
     int y = TOP_BAR_H + 14;
     fb_fill_rect(x, y, w, h, 0x00172233);
@@ -1886,13 +1912,45 @@ static void draw_quick_panel(void) {
     fb_fill_rect(x + 12, y + 118, w - 24, 24, feature_hub_open ? 0x00564990 : 0x00353f62);
     fb_draw_text(x + 18, y + 126, feature_hub_open ? "Feature Center: OPEN" : "Feature Center: CLOSED", 0x00eaf2fb, feature_hub_open ? 0x00564990 : 0x00353f62);
 
-    fb_fill_rect(x + 12, y + 156, 120, 24, 0x003c7a56);
-    fb_fill_rect(x + 136, y + 156, 120, 24, 0x006b4b52);
-    fb_draw_text(x + 26, y + 164, "Enable All", 0x00eaf2fb, 0x003c7a56);
-    fb_draw_text(x + 156, y + 164, "Disable All", 0x00eaf2fb, 0x006b4b52);
+    char sec_line[48];
+    sec_line[0] = '\0';
+    strncat(sec_line, "Security mode: ", sizeof(sec_line) - strlen(sec_line) - 1);
+    strncat(sec_line, security_mode_name(security_mode()), sizeof(sec_line) - strlen(sec_line) - 1);
+    fb_fill_rect(x + 12, y + 146, w - 24, 24, 0x00333f62);
+    fb_draw_text(x + 18, y + 154, sec_line, 0x00f7dfbf, 0x00333f62);
 
-    fb_fill_rect(x + 12, y + 188, w - 24, 28, 0x00243043);
-    fb_draw_text(x + 18, y + 198, "Hint: use Launcher for app search + run", 0x00bfd2e7, 0x00243043);
+    fb_fill_rect(
+        x + 12,
+        y + 174,
+        w - 24,
+        24,
+        (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? 0x00704b4f : 0x00325f56
+    );
+    fb_draw_text(
+        x + 18,
+        y + 182,
+        (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? "Failsafe: ACTIVE" : "Failsafe: ready",
+        0x00f1f7ff,
+        (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? 0x00704b4f : 0x00325f56
+    );
+
+    fb_fill_rect(x + 12, y + 206, 120, 24, 0x004c6f96);
+    fb_fill_rect(x + 136, y + 206, 120, 24, 0x006b4b52);
+    fb_draw_text(x + 28, y + 214, "Hardened", 0x00eaf2fb, 0x004c6f96);
+    fb_draw_text(x + 156, y + 214, "Lockdown", 0x00eaf2fb, 0x006b4b52);
+
+    fb_fill_rect(x + 12, y + 236, 120, 24, 0x00305f87);
+    fb_fill_rect(x + 136, y + 236, 120, 24, 0x0040675d);
+    fb_draw_text(x + 42, y + 244, "Verify", 0x00eaf2fb, 0x00305f87);
+    fb_draw_text(x + 152, y + 244, "Reset Failsafe", 0x00eaf2fb, 0x0040675d);
+
+    fb_fill_rect(x + 12, y + 266, 120, 24, 0x003c7a56);
+    fb_fill_rect(x + 136, y + 266, 120, 24, 0x006b4b52);
+    fb_draw_text(x + 26, y + 274, "Enable All", 0x00eaf2fb, 0x003c7a56);
+    fb_draw_text(x + 156, y + 274, "Disable All", 0x00eaf2fb, 0x006b4b52);
+
+    fb_fill_rect(x + 12, y + 298, w - 24, 28, 0x00243043);
+    fb_draw_text(x + 18, y + 308, "Launcher + Security Center are linked", 0x00bfd2e7, 0x00243043);
 }
 
 static void draw_notification_toasts(void) {
@@ -2040,6 +2098,60 @@ static void draw_window_content(const window_t *w) {
         fb_draw_text(tx, ty + 12, net_available() ? "adapter: up" : "adapter: down", 0x00b7cce0, w->color);
         fb_draw_text(tx, ty + 24, line, 0x00b7cce0, w->color);
         fb_draw_text(tx, ty + 36, "Commands: netinfo ping tcpsend", 0x00b7cce0, w->color);
+        return;
+    }
+
+    if (w->kind == WINDOW_SECURITY) {
+        char sec_features[40];
+        char suspicious[40];
+        char integrity[56];
+        char mode[48];
+        char feat_num[12];
+        char susp_num[12];
+        char ok_num[12];
+        char fail_num[12];
+
+        feat_num[0] = '\0';
+        susp_num[0] = '\0';
+        ok_num[0] = '\0';
+        fail_num[0] = '\0';
+        u32_to_dec((uint32_t)security_feature_enabled_count(), feat_num, sizeof(feat_num));
+        u32_to_dec(security_recent_suspicious_events(), susp_num, sizeof(susp_num));
+        u32_to_dec(security_integrity_checked_entries(), ok_num, sizeof(ok_num));
+        u32_to_dec(security_integrity_failure_count(), fail_num, sizeof(fail_num));
+
+        mode[0] = '\0';
+        strncat(mode, "mode: ", sizeof(mode) - strlen(mode) - 1);
+        strncat(mode, security_mode_name(security_mode()), sizeof(mode) - strlen(mode) - 1);
+
+        sec_features[0] = '\0';
+        strncat(sec_features, "controls: ", sizeof(sec_features) - strlen(sec_features) - 1);
+        strncat(sec_features, feat_num, sizeof(sec_features) - strlen(sec_features) - 1);
+        strncat(sec_features, "/200", sizeof(sec_features) - strlen(sec_features) - 1);
+
+        suspicious[0] = '\0';
+        strncat(suspicious, "suspicious events: ", sizeof(suspicious) - strlen(suspicious) - 1);
+        strncat(suspicious, susp_num, sizeof(suspicious) - strlen(suspicious) - 1);
+
+        integrity[0] = '\0';
+        strncat(integrity, "integrity checked/fail: ", sizeof(integrity) - strlen(integrity) - 1);
+        strncat(integrity, ok_num, sizeof(integrity) - strlen(integrity) - 1);
+        strncat(integrity, "/", sizeof(integrity) - strlen(integrity) - 1);
+        strncat(integrity, fail_num, sizeof(integrity) - strlen(integrity) - 1);
+
+        fb_draw_text(tx, ty, "Security Center", 0x00f6dfbf, w->color);
+        fb_draw_text(tx, ty + 12, mode, 0x00c8d9ea, w->color);
+        fb_draw_text(tx, ty + 24, sec_features, 0x00c8d9ea, w->color);
+        fb_draw_text(tx, ty + 36, suspicious, 0x00c8d9ea, w->color);
+        fb_draw_text(tx, ty + 48, integrity, 0x00c8d9ea, w->color);
+        fb_draw_text(
+            tx,
+            ty + 60,
+            (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? "failsafe: ACTIVE" : "failsafe: armed",
+            (security_intrusion_failsafe_active() || security_integrity_failsafe_active()) ? 0x00ffbaba : 0x00bed7f0,
+            w->color
+        );
+        fb_draw_text(tx, ty + 72, "Quick Panel: Hardened / Lockdown / Verify", 0x00bed7f0, w->color);
     }
 }
 
@@ -2106,7 +2218,7 @@ static void draw_snap_preview(void) {
     fb_fill_rect(x + w - 2, y, 2, h, 0x0079b5e8);
 }
 
-static void draw_cursor(const mouse_state_t *m) {
+static void draw_cursor(const mouse_state_t *m, int front_only) {
     static const char cursor_shape[22][16] = {
         "X               ",
         "XX              ",
@@ -2137,6 +2249,8 @@ static void draw_cursor(const mouse_state_t *m) {
     uint32_t edge = 0x00b4d8ff;
     uint32_t shadow = 0x000a1220;
 
+    void (*plot)(uint32_t, uint32_t, uint32_t) = front_only ? fb_put_pixel_front : fb_put_pixel;
+
     for (int row = 0; row < 22; row++) {
         for (int col = 0; col < 16; col++) {
             char ch = cursor_shape[row][col];
@@ -2144,7 +2258,7 @@ static void draw_cursor(const mouse_state_t *m) {
                 ch = ' ';
             }
             if (ch != ' ') {
-                fb_put_pixel((uint32_t)(m->x + col + 1), (uint32_t)(m->y + row + 1), shadow);
+                plot((uint32_t)(m->x + col + 1), (uint32_t)(m->y + row + 1), shadow);
             }
         }
     }
@@ -2161,9 +2275,50 @@ static void draw_cursor(const mouse_state_t *m) {
             } else if (ch == '+') {
                 c = edge;
             }
-            fb_put_pixel((uint32_t)(m->x + col), (uint32_t)(m->y + row), c);
+            plot((uint32_t)(m->x + col), (uint32_t)(m->y + row), c);
         }
     }
+}
+
+static void cursor_rect_from_state(const mouse_state_t *m, int *x, int *y, int *w, int *h) {
+    int px = m ? m->x : 0;
+    int py = m ? m->y : 0;
+    int rw = 18;
+    int rh = 24;
+    if (x) {
+        *x = px;
+    }
+    if (y) {
+        *y = py;
+    }
+    if (w) {
+        *w = rw;
+    }
+    if (h) {
+        *h = rh;
+    }
+}
+
+static void cursor_restore_previous(void) {
+    if (!cursor_prev_valid) {
+        return;
+    }
+    fb_present_region(cursor_prev_x, cursor_prev_y, cursor_prev_w, cursor_prev_h);
+    cursor_prev_valid = 0;
+}
+
+static void cursor_draw_front(const mouse_state_t *mouse) {
+    if (!mouse) {
+        return;
+    }
+    draw_cursor(mouse, 1);
+    cursor_rect_from_state(mouse, &cursor_prev_x, &cursor_prev_y, &cursor_prev_w, &cursor_prev_h);
+    cursor_prev_valid = 1;
+}
+
+static void cursor_present_only(const mouse_state_t *mouse) {
+    cursor_restore_previous();
+    cursor_draw_front(mouse);
 }
 
 static void gui_redraw(const mouse_state_t *mouse) {
@@ -2191,10 +2346,11 @@ static void gui_redraw(const mouse_state_t *mouse) {
         console_render();
     }
 
-    if (mouse) {
-        draw_cursor(mouse);
-    }
     fb_present();
+    cursor_prev_valid = 0;
+    if (mouse) {
+        cursor_draw_front(mouse);
+    }
 }
 
 void gui_set_console_overlay(bool enabled) {
@@ -2213,7 +2369,7 @@ void gui_init(void) {
     int dh;
     desktop_bounds(&dx, &dy, &dw, &dh);
 
-    window_count = 4;
+    window_count = 5;
 
     windows[0].x = dx + 12;
     windows[0].y = dy + 12;
@@ -2258,6 +2414,17 @@ void gui_init(void) {
     windows[3].minimized = 0;
     windows[3].maximized = 0;
     strcpy(windows[3].title, "Network");
+
+    windows[4].x = dx + dw - 356;
+    windows[4].y = dy + dh - 214;
+    windows[4].w = 344;
+    windows[4].h = 202;
+    windows[4].color = 0x00212939;
+    windows[4].kind = WINDOW_SECURITY;
+    windows[4].visible = 1;
+    windows[4].minimized = 0;
+    windows[4].maximized = 0;
+    strcpy(windows[4].title, "Security");
 
     for (int i = 0; i < window_count; i++) {
         windows[i].prev_x = windows[i].x;
@@ -2319,6 +2486,11 @@ void gui_init(void) {
     mouse_prev_right = mouse.right ? 1 : 0;
     mouse_prev_x = mouse.x;
     mouse_prev_y = mouse.y;
+    cursor_prev_valid = 0;
+    cursor_prev_x = mouse.x;
+    cursor_prev_y = mouse.y;
+    cursor_prev_w = 0;
+    cursor_prev_h = 0;
 
     uint64_t now = pit_ticks();
     last_frame_tick = (now >= FRAME_TARGET_TICKS) ? (now - FRAME_TARGET_TICKS) : 0;
@@ -2335,6 +2507,8 @@ static void run_start_action(int action) {
         window_focus_kind(WINDOW_FILES);
     } else if (action == START_ACTION_NETWORK) {
         window_focus_kind(WINDOW_NETWORK);
+    } else if (action == START_ACTION_SECURITY) {
+        window_focus_kind(WINDOW_SECURITY);
     } else if (action == START_ACTION_OPEN_LAUNCHER) {
         launcher_open = !launcher_open;
         launcher_refresh_apps(1);
@@ -2376,6 +2550,10 @@ void gui_tick(void) {
     int dirty = 0;
     int prev_left = mouse_prev_left;
     int prev_right = mouse_prev_right;
+    int cursor_changed = (mouse.x != mouse_prev_x ||
+                          mouse.y != mouse_prev_y ||
+                          mouse.left != (prev_left != 0) ||
+                          mouse.right != (prev_right != 0));
 
     int pressed = mouse.left && !prev_left;
     int released = !mouse.left && prev_left;
@@ -2637,7 +2815,7 @@ void gui_tick(void) {
 
         if (!handled && quick_panel_open) {
             int w = 286;
-            int h = 230;
+            int h = 336;
             int x = (int)fb_width() - w - 16;
             int y = TOP_BAR_H + 14;
             if (!point_in_rect(mouse.x, mouse.y, x, y, w, h)) {
@@ -2663,14 +2841,47 @@ void gui_tick(void) {
                 feature_hub_open = !feature_hub_open;
                 handled = 1;
                 dirty = 1;
-            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 156, 120, 24)) {
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 206, 120, 24)) {
+                if (security_set_mode(SECURITY_MODE_HARDENED)) {
+                    (void)security_save();
+                    gui_notify_push("Security mode: hardened", 0x00a9d7ff);
+                } else {
+                    gui_notify_push("Security mode change blocked", 0x00d18992);
+                }
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 136, y + 206, 120, 24)) {
+                if (security_set_mode(SECURITY_MODE_LOCKDOWN)) {
+                    (void)security_save();
+                    gui_notify_push("Security mode: lockdown", 0x00d8a8a8);
+                } else {
+                    gui_notify_push("Lockdown mode blocked", 0x00d18992);
+                }
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 236, 120, 24)) {
+                char report[96];
+                if (security_verify_integrity_now(report, sizeof(report))) {
+                    gui_notify_push("Integrity verification passed", 0x0080d8a2);
+                } else {
+                    gui_notify_push(report[0] ? report : "Integrity verification failed", 0x00d18992);
+                }
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 136, y + 236, 120, 24)) {
+                security_reset_failsafes(true, true);
+                (void)security_save();
+                gui_notify_push("Failsafes reset", 0x00a9d7ff);
+                handled = 1;
+                dirty = 1;
+            } else if (point_in_rect(mouse.x, mouse.y, x + 12, y + 266, 120, 24)) {
                 for (int i = 0; i < FEATURE_TOTAL; i++) {
                     feature_enabled[i] = 1;
                 }
                 gui_notify_push("All features enabled", 0x0080d8a2);
                 handled = 1;
                 dirty = 1;
-            } else if (point_in_rect(mouse.x, mouse.y, x + 136, y + 156, 120, 24)) {
+            } else if (point_in_rect(mouse.x, mouse.y, x + 136, y + 266, 120, 24)) {
                 for (int i = 0; i < FEATURE_TOTAL; i++) {
                     feature_enabled[i] = 0;
                 }
@@ -2811,9 +3022,6 @@ void gui_tick(void) {
         }
     }
 
-    if (mouse.x != mouse_prev_x || mouse.y != mouse_prev_y || mouse.left != prev_left || mouse.right != prev_right) {
-        dirty = 1;
-    }
     if (overlay != overlay_prev) {
         dirty = 1;
     }
@@ -2831,6 +3039,16 @@ void gui_tick(void) {
         last_clock_sec = now_secs;
         overlay_prev = overlay;
         need_redraw = 0;
+    } else if (!dirty && cursor_changed) {
+        if (fb_backbuffer_enabled()) {
+            cursor_present_only(&mouse);
+        } else {
+            gui_redraw(&mouse);
+            last_frame_tick = now_ticks;
+            last_clock_sec = now_secs;
+            overlay_prev = overlay;
+            need_redraw = 0;
+        }
     }
 
     mouse_prev_x = mouse.x;

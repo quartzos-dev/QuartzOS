@@ -1,206 +1,64 @@
-QUARTZOS ENTERPRISE MASTER SOFTWARE LICENSE AGREEMENT END-USER LICENSE
-AGREEMENT (EULA) DEVELOPMENT LICENSE FRAMEWORK OEM TERMS OFFICIAL PRICE
-LIST
-
-Version 1.0 Effective Date: 1 January 2026 Copyright © 2026 QuartzOS Dev
-All Rights Reserved
-
-IMPORTANT: THIS SOFTWARE IS LICENSED, NOT SOLD. BY INSTALLING,
-DOWNLOADING, ACCESSING, COPYING, ACTIVATING, OR USING QUARTZOS, YOU
-AGREE TO BE LEGALLY BOUND BY THIS AGREEMENT.
-
-============================================================ PART I –
-RECITALS ============================================================
-
-QuartzOS Dev (“Licensor”) owns all intellectual property rights in the
-proprietary operating system known as QuartzOS (“Software”).
-
-Licensee desires to obtain limited rights to use the Software.
-
-Licensor grants such rights strictly under the conditions contained
-herein.
-
-============================================================ PART II –
-DEFINITIONS ============================================================
-
-“Software” means QuartzOS in object code form only, including binaries,
-modules, components, updates, patches, system files, and documentation.
-
-“Device” means a single physical or virtual computing instance.
-
-“Server” means a Device configured to provide services to multiple
-users.
-
-“Authorized User” means a person permitted to use the Software under a
-valid license.
-
-“Subscription Term” means the paid duration of use.
-
-“Territory” means Member States of the European Union and the United
-Kingdom.
-
-“Development Use” means non-production testing, experimentation,
-research, or internal development.
-
-============================================================ PART III –
-GRANT OF LICENSE
-============================================================
-
-QuartzOS is licensed, not sold.
-
-Licensor grants a limited, revocable, non-exclusive, non-transferable,
-non-sublicensable license to install and use the Software within the
-Territory.
-
-No source code rights are granted. No ownership rights are transferred.
-All rights not expressly granted are reserved.
-
-============================================================ PART IV –
-LICENSE TIERS
-============================================================
-
-CONSUMER LICENSE €20 per month per Device €60 per year per Device Single
-Device. Personal non-commercial use only.
-
-ENTERPRISE LICENSE €120 per Device per year Internal commercial use
-only.
-
-EDUCATIONAL LICENSE €20 per Device per year Minimum 3 Devices.
-Accredited institutions only.
-
-SERVER LICENSE €1000 per Server per year Minimum 2 Servers required.
-
-DEV LICENSE (STANDARD) €20 one-time payment Up to 10 Devices Development
-use only.
-
-STUDENT DEV LICENSE €15 one-time Up to 10 Devices Academic use only.
-
-STARTUP DEV LICENSE €36 one-time Up to 10 Devices Internal development
-only. Production requires upgrade.
-
-OPEN LAB DEV LICENSE €50 one-time Up to 10 Devices Non-commercial
-research use only.
-
-OEM LICENSE Free via written agreement. Pre-installed hardware only.
-Subject to audit.
-
-All prices exclusive of VAT.
-
-============================================================ PART V –
-END USER LICENSE AGREEMENT (EULA)
-============================================================
-
-By installing or using QuartzOS, you confirm:
-
-1.  You have legal authority to enter this Agreement.
-2.  You agree to comply with all license restrictions.
-3.  You understand that QuartzOS is proprietary.
-
-If you do not agree, do not install or use the Software.
-
-============================================================ PART VI –
-RESTRICTIONS
-============================================================
-
-Except where mandatory law provides otherwise, Licensee shall NOT:
-
--   Modify, adapt, translate, or create derivative works.
--   Reverse engineer except as permitted under Irish statutory
-    exceptions.
--   Distribute, sublicense, rent, lease, lend, host, or resell.
--   Remove proprietary notices.
--   Circumvent technical restrictions.
--   Exceed licensed Device limits.
--   Use outside the Territory without written consent.
-
-============================================================ PART VII –
-DEVELOPMENT LICENSE CONDITIONS
-============================================================
-
-Dev License strictly prohibits:
-
--   Production deployment
--   Commercial hosting
--   Revenue-generating use
--   Enterprise operational deployment
--   Redistribution
--   SaaS offerings
-
-Misuse requires mandatory upgrade and payment of outstanding commercial
-fees.
-
-============================================================ PART VIII –
-AUDIT & COMPLIANCE
-============================================================
-
-Licensor may conduct compliance audits with reasonable notice.
-
-Licensee must maintain accurate deployment records.
-
-Under-licensing requires immediate remediation and payment of
-outstanding fees.
-
-Repeated violations may result in permanent termination.
-
-============================================================ PART IX –
-STATUTORY RIGHTS
-============================================================
-
-Nothing limits rights under:
-
--   Copyright and Related Rights Act 2000 (Ireland)
--   EU Directive 2009/24/EC
--   Irish Consumer Rights Act 2022
--   UK Consumer Rights Act 2015
-
-One backup copy permitted where legally allowed.
-
-============================================================ PART X –
-WARRANTY DISCLAIMER
-============================================================
-
-Software provided “AS IS” and “AS AVAILABLE.”
-
-All implied warranties disclaimed to the maximum extent permitted by
-Irish law.
-
-Statutory consumer protections remain unaffected.
-
-============================================================ PART XI –
-LIMITATION OF LIABILITY
-============================================================
-
-Licensor shall not be liable for:
-
--   Indirect damages
--   Consequential damages
--   Loss of revenue
--   Loss of data
--   Business interruption
-
-Aggregate liability limited to fees paid in preceding 12 months.
-
-Nothing excludes liability where prohibited by law.
-
-============================================================ PART XII –
-TERMINATION ============================================================
-
-License terminates automatically upon breach.
-
-Upon termination, Licensee must cease use and destroy all copies.
-
-============================================================ PART XIII –
-GOVERNING LAW
-============================================================
-
-This Agreement is governed by the laws of Ireland. Courts of Ireland
-have exclusive jurisdiction.
-
-============================================================ PART XIV –
-ENTIRE AGREEMENT
-============================================================
-
-This LICENSE file constitutes the entire agreement governing QuartzOS.
-
-============================================================ END OF
-DOCUMENT Generated: 2026-02-21 19:57:23 UTC
+QuartzOS Proprietary Software License Agreement
+Version 2.0
+Effective Date: February 24, 2026
+
+Copyright (c) 2026 QuartzOS Dev. All rights reserved.
+
+IMPORTANT: QuartzOS is licensed, not sold.
+By installing, activating, copying, or using QuartzOS, you agree to this License.
+If you do not agree, do not use QuartzOS.
+
+1. Scope
+- This License governs QuartzOS binaries, kernel components, tools, and bundled assets.
+- Source code access does not grant redistribution rights unless separately approved in writing by QuartzOS Dev.
+
+2. Grant of License
+- QuartzOS Dev grants a limited, revocable, non-exclusive, non-transferable, non-sublicensable license to use QuartzOS.
+- License use is limited to the purchased or approved tier and device/server count.
+
+3. Activation and Verification
+- A valid, non-revoked, verified license is required for full OS use.
+- QuartzOS may require periodic server-side verification of license validity.
+- If verification fails, is rejected, or cannot be completed, QuartzOS may restrict functionality or deny access.
+
+4. Security and Integrity Controls
+- QuartzOS enforces kernel-level integrity validation.
+- QuartzOS may require remote antivirus verification for critical file integrity checks.
+- Security verification channels are kernel-controlled and not exposed for user-level direct access.
+
+5. Restrictions
+You may not:
+- redistribute QuartzOS binaries without written authorization;
+- remove, bypass, or tamper with licensing, verification, encryption, or security controls;
+- use QuartzOS for unlawful activity;
+- claim QuartzOS as your own software;
+- reverse engineer except where mandatory local law explicitly permits limited exceptions.
+
+6. Fair Use and Terms
+- Use of QuartzOS is subject to:
+  - TERMS_AND_CONDITIONS.md
+  - FAIR_USE_POLICY.md
+  - SECURITY_POLICY.md
+- In the event of conflict, this License controls first, then Terms and Conditions.
+
+7. Updates
+- QuartzOS Dev may update license enforcement, verification, and security mechanisms.
+- Continued use after update constitutes acceptance of updated terms.
+
+8. Termination
+- This License terminates automatically if you violate this License, the Terms and Conditions, or the Fair Use Policy.
+- Upon termination, you must stop using QuartzOS immediately.
+
+9. Warranty Disclaimer
+- QuartzOS is provided "AS IS" and "AS AVAILABLE" without warranties to the maximum extent permitted by law.
+
+10. Limitation of Liability
+- To the maximum extent permitted by law, QuartzOS Dev is not liable for indirect, incidental, special, consequential, or exemplary damages.
+
+11. Governing Law
+- This License is governed by the laws specified in TERMS_AND_CONDITIONS.md.
+
+12. Contact
+- Security and licensing policy contact information is defined in SECURITY_POLICY.md.
+
+End of License.

@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let repo = detectDefaultRepoPath()
         repoPathField.stringValue = repo
-        hashPathField.stringValue = (repo as NSString).appendingPathComponent("build/issuer_admin_hash.txt")
+        hashPathField.stringValue = ""
 
         buildWindow()
         window.makeKeyAndOrderFront(nil)
@@ -84,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let topGrid = NSGridView(views: [
             [makeLabel("Repo Path"), repoPathField],
-            [makeLabel("Admin Hash File"), hashPathField],
+            [makeLabel("Admin Hash File (optional)"), hashPathField],
             [makeLabel("Issuer Password"), passwordField],
             [makeLabel("Owner"), ownerField],
             [makeLabel("Tier"), tierBox],
@@ -213,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if requiresPassword {
             env["QOS_ISSUER_PASSWORD"] = trim(passwordField.stringValue)
         }
-        if injectAdminHash, let adminHash = loadAdminHash(), !adminHash.isEmpty {
+        if injectAdminHash, env["QOS_ISSUER_ADMIN_HASH"] == nil, let adminHash = loadAdminHash(), !adminHash.isEmpty {
             env["QOS_ISSUER_ADMIN_HASH"] = adminHash
         }
         process.environment = env

@@ -8,6 +8,7 @@
 #include <kernel/slog.h>
 #include <lib/string.h>
 #include <memory/heap.h>
+#include <net/net.h>
 
 #define SECURITY_CFG_PATH "/etc/security.cfg"
 #define SECURITY_MANIFEST_PATH "/etc/security_manifest.txt"
@@ -17,8 +18,9 @@
 #define SECURITY_FEATURE_BYTES ((SECURITY_FEATURE_COUNT + 7u) / 8u)
 #define SECURITY_MAX_MANIFEST 16384u
 #define SECURITY_MAX_FILE_READ (2u * 1024u * 1024u)
+#define SECURITY_SERVER_TIMEOUT_TICKS (80u)
 
-static const char *g_core_feature_names[20] = {
+static const char *g_core_feature_names[33] = {
     "enforce-license-gate",
     "enforce-exec-path",
     "enforce-fs-guards",
@@ -38,13 +40,28 @@ static const char *g_core_feature_names[20] = {
     "strict-syswrite",
     "rate-limit-events",
     "require-manifest",
-    "allow-failsafe-reset"
+    "allow-failsafe-reset",
+    "allow-server-control",
+    "allow-server-export",
+    "allow-server-send",
+    "server-require-private-endpoint",
+    "server-restrict-privileged-ports",
+    "server-restrict-risky-ports",
+    "server-rate-limit-send",
+    "server-block-in-lockdown",
+    "server-require-license",
+    "server-export-sandbox",
+    "remote-av-required",
+    "remote-license-required",
+    "block-user-server-access"
 };
 
 static const char *g_feature_categories[10] = {
     "identity", "auth", "integrity", "memory", "execution",
     "filesystem", "network", "isolation", "audit", "platform"
 };
+
+#define CORE_FEATURE_NAME_COUNT (sizeof(g_core_feature_names) / sizeof(g_core_feature_names[0]))
 
 typedef struct sha256_ctx {
     uint32_t state[8];
@@ -83,6 +100,9 @@ static uint64_t g_intrusion_window_start;
 static uint32_t g_recent_suspicious_events;
 static uint32_t g_integrity_checked_entries;
 static uint32_t g_integrity_failure_count;
+static uint64_t g_server_send_window_start;
+static uint32_t g_server_send_count;
+static uint64_t g_server_av_retry_tick;
 
 static uint32_t rot_right32(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32u - n));
@@ -301,6 +321,72 @@ static int parse_u32_dec(const char *text, uint32_t *out) {
     return 1;
 }
 
+static int path_has_prefix(const char *path, const char *prefix) {
+    if (!path || !prefix) {
+        return 0;
+    }
+    size_t plen = strlen(prefix);
+    if (plen == 0 || strncmp(path, prefix, plen) != 0) {
+        return 0;
+    }
+    return path[plen] == '\0' || path[plen] == '/';
+}
+
+static int ipv4_is_private(uint32_t ip) {
+    uint8_t a = (uint8_t)((ip >> 24) & 0xFFu);
+    uint8_t b = (uint8_t)((ip >> 16) & 0xFFu);
+
+    if (a == 10u || a == 127u) {
+        return 1;
+    }
+    if (a == 172u && b >= 16u && b <= 31u) {
+        return 1;
+    }
+    if (a == 192u && b == 168u) {
+        return 1;
+    }
+    if (a == 169u && b == 254u) {
+        return 1;
+    }
+    return 0;
+}
+
+static int response_allows(const char *resp) {
+    if (!resp || !resp[0]) {
+        return 0;
+    }
+    return strncmp(resp, "OK", 2) == 0 ||
+           strncmp(resp, "ALLOW", 5) == 0 ||
+           strncmp(resp, "VALID", 5) == 0;
+}
+
+static int server_port_is_risky(uint16_t port) {
+    switch (port) {
+        case 20:
+        case 21:
+        case 22:
+        case 23:
+        case 25:
+        case 53:
+        case 69:
+        case 80:
+        case 110:
+        case 143:
+        case 443:
+        case 445:
+        case 1433:
+        case 3306:
+        case 3389:
+        case 5432:
+        case 5900:
+        case 6379:
+        case 9200:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static int line_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
@@ -340,6 +426,7 @@ static const char *event_name(security_event_t event) {
         case SECURITY_EVENT_INTEGRITY_FAIL: return "integrity-fail";
         case SECURITY_EVENT_SYSCALL_BLOCKED: return "syscall-blocked";
         case SECURITY_EVENT_AUTH_FAIL: return "auth-fail";
+        case SECURITY_EVENT_SERVER_BLOCKED: return "server-blocked";
         default: return "unknown";
     }
 }
@@ -352,7 +439,8 @@ static int event_is_suspicious(security_event_t event) {
            event == SECURITY_EVENT_LICENSE_BLOCKED ||
            event == SECURITY_EVENT_INTEGRITY_FAIL ||
            event == SECURITY_EVENT_SYSCALL_BLOCKED ||
-           event == SECURITY_EVENT_AUTH_FAIL;
+           event == SECURITY_EVENT_AUTH_FAIL ||
+           event == SECURITY_EVENT_SERVER_BLOCKED;
 }
 
 static void apply_killswitch_actions(const char *reason) {
@@ -420,6 +508,9 @@ static void init_defaults(void) {
     g_recent_suspicious_events = 0;
     g_integrity_checked_entries = 0;
     g_integrity_failure_count = 0;
+    g_server_send_window_start = pit_ticks();
+    g_server_send_count = 0;
+    g_server_av_retry_tick = 0;
 }
 
 void security_init(void) {
@@ -667,7 +758,7 @@ void security_feature_name(size_t index, char *out, size_t out_len) {
         return;
     }
 
-    if (index < 20u) {
+    if (index < CORE_FEATURE_NAME_COUNT) {
         append_text(out, out_len, g_core_feature_names[index]);
         return;
     }
@@ -695,6 +786,301 @@ bool security_allow_network_ops(void) {
     }
     if (security_lockdown_active()) {
         security_note_event(SECURITY_EVENT_NET_BLOCKED, "lockdown");
+        return false;
+    }
+    return true;
+}
+
+bool security_allow_server_command(const char *verb, char *reason, size_t reason_len) {
+    if (reason && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    if (g_features[SECURITY_FEATURE_BLOCK_USER_SERVER_ACCESS]) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "server access is kernel-only");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-user-access-blocked");
+        return false;
+    }
+
+    if (!g_features[SECURITY_FEATURE_ALLOW_SERVER_CONTROL]) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "server control disabled by security policy");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-control-disabled");
+        return false;
+    }
+
+    if (g_features[SECURITY_FEATURE_SERVER_REQUIRE_LICENSE] && !license_usage_allowed()) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "verified license required for server operations");
+        }
+        security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "server-license-gate");
+        return false;
+    }
+
+    if (security_lockdown_active() && g_features[SECURITY_FEATURE_SERVER_BLOCK_IN_LOCKDOWN]) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "security lockdown active");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-lockdown");
+        return false;
+    }
+
+    if (verb &&
+        (strcmp(verb, "send") == 0 || strcmp(verb, "ping") == 0 || strcmp(verb, "sync") == 0) &&
+        !security_allow_network_ops()) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "network operations blocked by security policy");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool security_user_server_access_allowed(void) {
+    return g_features[SECURITY_FEATURE_BLOCK_USER_SERVER_ACCESS] == 0u;
+}
+
+bool security_allow_server_endpoint(uint32_t ip, uint16_t port,
+                                    char *reason, size_t reason_len) {
+    if (!security_allow_server_command("endpoint", reason, reason_len)) {
+        return false;
+    }
+
+    if (port == 0u) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "endpoint port must be non-zero");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-endpoint-port-invalid");
+        return false;
+    }
+
+    if (g_features[SECURITY_FEATURE_SERVER_RESTRICT_PRIVILEGED_PORTS] && port < 1024u) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "privileged ports blocked by policy");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-endpoint-port-privileged");
+        return false;
+    }
+
+    if (g_features[SECURITY_FEATURE_SERVER_RESTRICT_RISKY_PORTS] && server_port_is_risky(port)) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "high-risk endpoint port blocked by policy");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-endpoint-port-risky");
+        return false;
+    }
+
+    if (g_features[SECURITY_FEATURE_SERVER_REQUIRE_PRIVATE_ENDPOINT] && !ipv4_is_private(ip)) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "endpoint must be private IPv4");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-endpoint-nonprivate");
+        return false;
+    }
+
+    return true;
+}
+
+bool security_allow_server_payload(size_t payload_len, char *reason, size_t reason_len) {
+    if (!security_allow_server_command("send", reason, reason_len)) {
+        return false;
+    }
+
+    if (!g_features[SECURITY_FEATURE_ALLOW_SERVER_SEND]) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "server send blocked by security policy");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-send-disabled");
+        return false;
+    }
+
+    size_t max_payload = 768u;
+    if (security_lockdown_active()) {
+        max_payload = 256u;
+    } else if (g_mode == SECURITY_MODE_HARDENED) {
+        max_payload = 512u;
+    }
+
+    if (payload_len == 0u || payload_len > max_payload) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "payload size blocked by policy");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-payload-size");
+        return false;
+    }
+
+    if (g_features[SECURITY_FEATURE_SERVER_RATE_LIMIT_SEND]) {
+        uint64_t now = pit_ticks();
+        uint64_t window = 10u * SECURITY_PIT_HZ;
+        if (g_server_send_window_start == 0u || now - g_server_send_window_start >= window) {
+            g_server_send_window_start = now;
+            g_server_send_count = 0u;
+        }
+
+        uint32_t max_sends = 10u;
+        if (security_lockdown_active()) {
+            max_sends = 2u;
+        } else if (g_mode == SECURITY_MODE_HARDENED) {
+            max_sends = 6u;
+        }
+
+        if (g_server_send_count >= max_sends) {
+            if (reason && reason_len > 0) {
+                append_text(reason, reason_len, "server send rate limit active");
+            }
+            security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-send-rate-limit");
+            return false;
+        }
+        g_server_send_count++;
+    }
+
+    return true;
+}
+
+bool security_allow_server_export(const char *path, char *reason, size_t reason_len) {
+    if (!security_allow_server_command("export", reason, reason_len)) {
+        return false;
+    }
+
+    if (!g_features[SECURITY_FEATURE_ALLOW_SERVER_EXPORT]) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "server export blocked by security policy");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-export-disabled");
+        return false;
+    }
+
+    if (!path || path[0] != '/') {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "export path must be absolute");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-export-path-invalid");
+        return false;
+    }
+
+    if (g_features[SECURITY_FEATURE_SERVER_EXPORT_SANDBOX] && !path_has_prefix(path, "/server")) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "export path must be under /server");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-export-path-sandbox");
+        return false;
+    }
+
+    if (path_has_prefix(path, "/etc") || path_has_prefix(path, "/boot") || path_has_prefix(path, "/bin")) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "export path targets protected area");
+        }
+        security_note_event(SECURITY_EVENT_SERVER_BLOCKED, "server-export-path-protected");
+        return false;
+    }
+
+    return true;
+}
+
+bool security_server_antivirus_verify(const char *path, const char *sha256_hex,
+                                      char *reason, size_t reason_len) {
+    if (reason && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    if (!g_features[SECURITY_FEATURE_REMOTE_AV_REQUIRED]) {
+        return true;
+    }
+    if (!path || !sha256_hex || strlen(sha256_hex) != 64u) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "invalid antivirus request");
+        }
+        return false;
+    }
+    uint64_t now = pit_ticks();
+    if (g_server_av_retry_tick != 0 && now < g_server_av_retry_tick) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "antivirus server backoff active");
+        }
+        return false;
+    }
+    if (!net_available()) {
+        g_server_av_retry_tick = now + (15u * SECURITY_PIT_HZ);
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "server unavailable");
+        }
+        return false;
+    }
+
+    char req[320];
+    char resp[160];
+    req[0] = '\0';
+    resp[0] = '\0';
+
+    append_text(req, sizeof(req), "QOS_AV_VERIFY path=");
+    append_text(req, sizeof(req), path);
+    append_text(req, sizeof(req), " sha256=");
+    append_text(req, sizeof(req), sha256_hex);
+
+    if (!net_tcp_request_text(SECURITY_SERVER_IP, SECURITY_SERVER_AV_PORT,
+                              req, resp, sizeof(resp), SECURITY_SERVER_TIMEOUT_TICKS)) {
+        g_server_av_retry_tick = now + (15u * SECURITY_PIT_HZ);
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "no antivirus server response");
+        }
+        return false;
+    }
+
+    trim_in_place(resp);
+    if (!response_allows(resp)) {
+        g_server_av_retry_tick = now + (5u * SECURITY_PIT_HZ);
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "antivirus server rejected file");
+        }
+        return false;
+    }
+    g_server_av_retry_tick = 0;
+    return true;
+}
+
+bool security_server_license_verify(const char *license_key, char *reason, size_t reason_len) {
+    if (reason && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    if (!g_features[SECURITY_FEATURE_REMOTE_LICENSE_REQUIRED]) {
+        return true;
+    }
+    if (!license_key || !license_key[0]) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "invalid license key");
+        }
+        return false;
+    }
+    if (!net_available()) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "license server unavailable");
+        }
+        return false;
+    }
+
+    char req[192];
+    char resp[160];
+    req[0] = '\0';
+    resp[0] = '\0';
+
+    append_text(req, sizeof(req), "QOS_LICENSE_VERIFY key=");
+    append_text(req, sizeof(req), license_key);
+
+    if (!net_tcp_request_text(SECURITY_SERVER_IP, SECURITY_SERVER_LICENSE_PORT,
+                              req, resp, sizeof(resp), SECURITY_SERVER_TIMEOUT_TICKS)) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "no license server response");
+        }
+        return false;
+    }
+
+    trim_in_place(resp);
+    if (!response_allows(resp)) {
+        if (reason && reason_len > 0) {
+            append_text(reason, reason_len, "license not approved by server database");
+        }
         return false;
     }
     return true;
@@ -857,6 +1243,8 @@ bool security_verify_integrity_now(char *summary, size_t summary_len) {
     uint32_t mismatch = 0;
     uint32_t missing = 0;
     uint32_t parse_errors = 0;
+    uint32_t av_reject = 0;
+    int av_channel_failed = 0;
 
     size_t pos = 0;
     while (pos < mread) {
@@ -904,15 +1292,29 @@ bool security_verify_integrity_now(char *summary, size_t summary_len) {
         }
 
         checked++;
+        uint32_t mismatch_before = mismatch;
+        uint32_t missing_before = missing;
         if (!verify_manifest_line(path, expected, &mismatch, &missing)) {
             parse_errors++;
+            continue;
+        }
+        if (mismatch == mismatch_before && missing == missing_before) {
+            if (av_channel_failed) {
+                av_reject++;
+                continue;
+            }
+            char av_reason[96];
+            if (!security_server_antivirus_verify(path, expected, av_reason, sizeof(av_reason))) {
+                av_reject++;
+                av_channel_failed = 1;
+            }
         }
     }
 
     kfree(manifest);
 
     g_integrity_checked_entries = checked;
-    g_integrity_failure_count = mismatch + missing + parse_errors;
+    g_integrity_failure_count = mismatch + missing + parse_errors + av_reject;
 
     if (summary && summary_len > 0) {
         append_text(summary, summary_len, "checked=");
@@ -923,6 +1325,8 @@ bool security_verify_integrity_now(char *summary, size_t summary_len) {
         append_u32(summary, summary_len, missing);
         append_text(summary, summary_len, " parse=");
         append_u32(summary, summary_len, parse_errors);
+        append_text(summary, summary_len, " av=");
+        append_u32(summary, summary_len, av_reject);
     }
 
     if (checked == 0 || g_integrity_failure_count != 0) {

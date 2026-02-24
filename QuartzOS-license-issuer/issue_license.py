@@ -11,6 +11,7 @@ import io
 import json
 import os
 import secrets
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -684,6 +685,22 @@ def load_admin_hash_record() -> str:
     configured = (os.getenv("QOS_ISSUER_ADMIN_HASH") or "").strip()
     if configured:
         return configured
+
+    if sys.platform == "darwin":
+        try:
+            launchctl = subprocess.run(
+                ["launchctl", "getenv", "QOS_ISSUER_ADMIN_HASH"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1.0,
+            )
+            launchctl_value = launchctl.stdout.strip() if launchctl.returncode == 0 else ""
+            if launchctl_value:
+                return launchctl_value
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
     try:
         if DEFAULT_ADMIN_HASH_FILE.exists():
             for line in DEFAULT_ADMIN_HASH_FILE.read_text(encoding="utf-8").splitlines():

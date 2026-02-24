@@ -25,6 +25,8 @@
 #define NET_ARP_CACHE_SIZE 16
 #define NET_MAX_FRAME 1600
 #define NET_MAX_TCP_CONN 8
+#define NET_TCP_ACTIVE_RX_MAX 512
+#define NET_TIMEOUT_STAGNANT_LIMIT 200000u
 
 typedef struct eth_header {
     uint8_t dst[6];
@@ -100,6 +102,9 @@ typedef struct tcp_conn {
     uint32_t snd_nxt;
     uint32_t rcv_nxt;
     uint8_t remote_mac[6];
+    uint16_t rx_len;
+    uint8_t rx_ready;
+    char rx_data[NET_TCP_ACTIVE_RX_MAX];
     tcp_state_t state;
 } tcp_conn_t;
 
@@ -333,7 +338,18 @@ static int resolve_mac(uint32_t dst_ip, uint8_t out_mac[6], uint64_t timeout_tic
     send_arp_request(next_hop);
 
     uint64_t deadline = pit_ticks() + timeout_ticks;
+    uint64_t last_tick = pit_ticks();
+    uint32_t stagnant = 0;
     while (pit_ticks() < deadline) {
+        uint64_t now = pit_ticks();
+        if (now == last_tick) {
+            if (++stagnant > NET_TIMEOUT_STAGNANT_LIMIT) {
+                break;
+            }
+        } else {
+            last_tick = now;
+            stagnant = 0;
+        }
         net_tick();
         if (arp_lookup(next_hop, out_mac)) {
             return 1;
@@ -566,7 +582,21 @@ static void handle_tcp(uint32_t src_ip, const uint8_t src_mac[6], const uint8_t 
         conn->rcv_nxt = seq + (uint32_t)data_len;
         tcp_send_segment(conn, TCP_FLAG_ACK, 0, 0, conn->snd_nxt, conn->rcv_nxt);
 
-        if (!conn->active_open) {
+        if (conn->active_open) {
+            size_t avail = sizeof(conn->rx_data) - 1u;
+            if (conn->rx_len < avail) {
+                size_t copy = data_len;
+                if (copy > avail - conn->rx_len) {
+                    copy = avail - conn->rx_len;
+                }
+                if (copy > 0) {
+                    memcpy(conn->rx_data + conn->rx_len, data, copy);
+                    conn->rx_len += (uint16_t)copy;
+                    conn->rx_data[conn->rx_len] = '\0';
+                    conn->rx_ready = 1;
+                }
+            }
+        } else {
             tcp_send_segment(conn, TCP_FLAG_PSH | TCP_FLAG_ACK, data, data_len, conn->snd_nxt, conn->rcv_nxt);
             conn->snd_nxt += (uint32_t)data_len;
         }
@@ -776,7 +806,18 @@ bool net_ping(uint32_t ip) {
     }
 
     uint64_t deadline = pit_ticks() + 300;
+    uint64_t last_tick = pit_ticks();
+    uint32_t stagnant = 0;
     while (pit_ticks() < deadline) {
+        uint64_t now = pit_ticks();
+        if (now == last_tick) {
+            if (++stagnant > NET_TIMEOUT_STAGNANT_LIMIT) {
+                break;
+            }
+        } else {
+            last_tick = now;
+            stagnant = 0;
+        }
         int waiting;
         int result;
         spin_lock(&g_net_lock);
@@ -797,8 +838,16 @@ bool net_ping(uint32_t ip) {
 }
 
 bool net_tcp_send_text(uint32_t ip, uint16_t port, const char *text) {
-    if (!g_net_available || !text || port == 0) {
+    return net_tcp_request_text(ip, port, text, 0, 0, 0);
+}
+
+bool net_tcp_request_text(uint32_t ip, uint16_t port, const char *request,
+                          char *response, size_t response_len, uint32_t timeout_ticks) {
+    if (!g_net_available || !request || port == 0) {
         return false;
+    }
+    if (response && response_len > 0) {
+        response[0] = '\0';
     }
 
     uint8_t remote_mac[6];
@@ -825,6 +874,9 @@ bool net_tcp_send_text(uint32_t ip, uint16_t port, const char *text) {
     local_port = conn->local_port;
     conn->snd_nxt = 0x20000000u + ((uint32_t)pit_ticks() & 0xFFFFu);
     conn->rcv_nxt = 0;
+    conn->rx_len = 0;
+    conn->rx_ready = 0;
+    conn->rx_data[0] = '\0';
     memcpy(conn->remote_mac, remote_mac, 6);
     conn->state = TCP_STATE_SYN_SENT;
     spin_unlock(&g_net_lock);
@@ -839,7 +891,18 @@ bool net_tcp_send_text(uint32_t ip, uint16_t port, const char *text) {
     spin_unlock(&g_net_lock);
 
     uint64_t deadline = pit_ticks() + 500;
+    uint64_t last_tick = pit_ticks();
+    uint32_t stagnant = 0;
     while (pit_ticks() < deadline) {
+        uint64_t now = pit_ticks();
+        if (now == last_tick) {
+            if (++stagnant > NET_TIMEOUT_STAGNANT_LIMIT) {
+                break;
+            }
+        } else {
+            last_tick = now;
+            stagnant = 0;
+        }
         int ready = 0;
         spin_lock(&g_net_lock);
         if (conn->used &&
@@ -867,18 +930,71 @@ bool net_tcp_send_text(uint32_t ip, uint16_t port, const char *text) {
         return false;
     }
 
-    size_t len = strlen(text);
+    size_t len = strlen(request);
     if (len > 1200) {
         len = 1200;
     }
 
     if (len > 0) {
-        if (tcp_send_segment(conn, TCP_FLAG_PSH | TCP_FLAG_ACK, text, len, conn->snd_nxt, conn->rcv_nxt) < 0) {
+        if (tcp_send_segment(conn, TCP_FLAG_PSH | TCP_FLAG_ACK, request, len, conn->snd_nxt, conn->rcv_nxt) < 0) {
             tcp_close(conn);
             spin_unlock(&g_net_lock);
             return false;
         }
         conn->snd_nxt += (uint32_t)len;
+    }
+
+    if (response && response_len > 1u) {
+        spin_unlock(&g_net_lock);
+
+        uint64_t timeout = timeout_ticks != 0 ? (uint64_t)timeout_ticks : 500u;
+        uint64_t deadline_rx = pit_ticks() + timeout;
+        uint64_t last_rx_tick = pit_ticks();
+        uint32_t stagnant_rx = 0;
+        int received = 0;
+        while (pit_ticks() < deadline_rx) {
+            uint64_t now = pit_ticks();
+            if (now == last_rx_tick) {
+                if (++stagnant_rx > NET_TIMEOUT_STAGNANT_LIMIT) {
+                    break;
+                }
+            } else {
+                last_rx_tick = now;
+                stagnant_rx = 0;
+            }
+            spin_lock(&g_net_lock);
+            if (conn->used &&
+                conn->remote_ip == ip &&
+                conn->remote_port == port &&
+                conn->local_port == local_port &&
+                conn->rx_len > 0) {
+                size_t copy = conn->rx_len;
+                if (copy >= response_len) {
+                    copy = response_len - 1u;
+                }
+                memcpy(response, conn->rx_data, copy);
+                response[copy] = '\0';
+                received = 1;
+                spin_unlock(&g_net_lock);
+                break;
+            }
+            spin_unlock(&g_net_lock);
+            net_tick();
+        }
+
+        spin_lock(&g_net_lock);
+        if (!received) {
+            if (conn->used &&
+                conn->remote_ip == ip &&
+                conn->remote_port == port &&
+                conn->local_port == local_port) {
+                (void)tcp_send_segment(conn, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0, conn->snd_nxt, conn->rcv_nxt);
+                conn->snd_nxt += 1;
+                tcp_close(conn);
+            }
+            spin_unlock(&g_net_lock);
+            return false;
+        }
     }
 
     tcp_send_segment(conn, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0, conn->snd_nxt, conn->rcv_nxt);
