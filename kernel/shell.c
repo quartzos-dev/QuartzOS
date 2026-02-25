@@ -29,6 +29,8 @@ static char line[256];
 static size_t line_len;
 static int g_license_lock_mode;
 static int g_security_lock_mode;
+static int g_license_setup_active;
+static uint32_t g_license_setup_attempts;
 
 #define SERVER_FEATURE_COUNT 900u
 #define SERVER_USE_CASE_COUNT 5000u
@@ -304,6 +306,7 @@ static int command_allowed_in_lock_mode(int argc, char **argv) {
             strcmp(argv[1], "terms") == 0 ||
             strcmp(argv[1], "accept") == 0 ||
             strcmp(argv[1], "reject") == 0 ||
+            strcmp(argv[1], "setup") == 0 ||
             strcmp(argv[1], "verify") == 0 ||
             strcmp(argv[1], "activate") == 0 ||
             strcmp(argv[1], "deactivate") == 0 ||
@@ -652,6 +655,129 @@ static void print_prompt(void) {
     kprintf("\n%s$ ", cwd);
 }
 
+static char *trim_spaces(char *text) {
+    if (!text) {
+        return text;
+    }
+    while (*text == ' ' || *text == '\t') {
+        text++;
+    }
+    size_t len = strlen(text);
+    while (len > 0 && (text[len - 1] == ' ' || text[len - 1] == '\t')) {
+        text[--len] = '\0';
+    }
+    return text;
+}
+
+static void print_license_setup_prompt(void) {
+    console_set_prompt("license-setup");
+    kprintf("\nlicense-key> ");
+}
+
+static int license_unlock_runtime(void) {
+    if (!license_usage_allowed()) {
+        kprintf("license: unlock denied. requires verified consumer monthly license and accepted terms.\n");
+        return 0;
+    }
+    if (security_lockdown_active()) {
+        kprintf("license: unlock denied. security lockdown active; clear failsafe first.\n");
+        return 0;
+    }
+    const char *profile = config_get("boot.profile");
+    if (!profile) {
+        profile = "normal";
+    }
+    if (!apply_profile_runtime(profile)) {
+        kprintf("license: unlock failed to start desktop services\n");
+        return 0;
+    }
+    g_license_lock_mode = 0;
+    sync_security_lock_mode();
+    kprintf("license: system unlocked (profile=%s)\n", profile);
+    return 1;
+}
+
+static int license_setup_activate_and_unlock(const char *key) {
+    if (!key || !key[0]) {
+        kprintf("license setup: key cannot be empty\n");
+        return 0;
+    }
+    if (!license_terms_accepted()) {
+        if (!license_accept_terms()) {
+            kprintf("license setup: cannot accept terms (missing or invalid terms file)\n");
+            return 0;
+        }
+        kprintf("license setup: terms accepted\n");
+    }
+    if (!license_activate(key)) {
+        uint32_t lock_left = license_lockout_remaining_seconds();
+        kprintf("license setup: activation failed (%s",
+                license_error_text(license_last_error()));
+        if (lock_left > 0) {
+            kprintf(", lock=%us", (unsigned)lock_left);
+        }
+        kprintf(")\n");
+        return 0;
+    }
+    kprintf("license setup: key activated\n");
+    return license_unlock_runtime();
+}
+
+static void start_license_setup_app(int auto_started) {
+    g_license_setup_active = 1;
+    g_license_setup_attempts = 0;
+
+    kprintf("\n=== QuartzOS License Setup ===\n");
+    if (auto_started) {
+        kprintf("System is in license lock mode.\n");
+    }
+    kprintf("Paste a QOS3 consumer key and press Enter.\n");
+    kprintf("Commands: 'skip' keeps manual mode, 'status' shows license state.\n");
+    print_license_setup_prompt();
+}
+
+static void handle_license_setup_line(char *raw_input) {
+    char *input = trim_spaces(raw_input);
+    if (!input || input[0] == '\0') {
+        kprintf("license setup: enter a key or type 'skip'\n");
+        print_license_setup_prompt();
+        return;
+    }
+
+    if (strcmp(input, "skip") == 0 || strcmp(input, "cancel") == 0) {
+        g_license_setup_active = 0;
+        kprintf("license setup: skipped (manual commands remain available)\n");
+        print_prompt();
+        return;
+    }
+
+    if (strcmp(input, "status") == 0) {
+        char active[LICENSE_MAX_KEY_TEXT + 1];
+        const char *tier = license_active_tier_name();
+        license_active_key(active, sizeof(active));
+        kprintf("license setup: active=%s usage=%s key=%s tier=%s terms=%s last=%s\n",
+                license_is_active() ? "yes" : "no",
+                license_usage_allowed() ? "allowed" : "blocked",
+                active,
+                license_is_active() && tier ? tier : "none",
+                license_terms_accepted() ? "accepted" : (license_terms_available() ? "pending" : "missing"),
+                license_error_text(license_last_error()));
+        print_license_setup_prompt();
+        return;
+    }
+
+    g_license_setup_attempts++;
+    if (license_setup_activate_and_unlock(input)) {
+        g_license_setup_active = 0;
+        print_prompt();
+        return;
+    }
+
+    kprintf("license setup: try again or type 'skip' (attempt %u)\n",
+            (unsigned)g_license_setup_attempts);
+    print_license_setup_prompt();
+}
+
 static int path_resolve(const char *input, char *out, size_t out_len) {
     if (!out || out_len < 2) {
         return 0;
@@ -945,6 +1071,7 @@ static void cmd_help(void) {
         kprintf("  license terms      View terms\n");
         kprintf("  license accept     Accept terms\n");
         kprintf("  license reject     Reject terms\n");
+        kprintf("  license setup      Start guided license activation\n");
         kprintf("  license verify <key>    Validate key signature/state\n");
         kprintf("  license activate <key>  Activate key\n");
         kprintf("  license reload     Reload key databases\n");
@@ -1007,7 +1134,7 @@ static void execute_line(char *input) {
             audit_log("CMD_BLOCKED", "license-lock");
             security_note_event(SECURITY_EVENT_LICENSE_BLOCKED, "license-lock");
             kprintf("system locked: command blocked until verified consumer monthly license is active.\n");
-            kprintf("use: license status | license terms | license accept | license activate <key> | license unlock\n");
+            kprintf("use: license setup | license status | license terms | license accept | license activate <key> | license unlock\n");
         } else {
             audit_log("CMD_BLOCKED", "security-lock");
             security_note_event(SECURITY_EVENT_CMD_BLOCKED, "security-lock");
@@ -1334,6 +1461,15 @@ static void execute_line(char *input) {
             return;
         }
 
+        if (strcmp(argv[1], "setup") == 0) {
+            if (license_usage_allowed()) {
+                kprintf("license setup: already unlocked\n");
+                return;
+            }
+            start_license_setup_app(0);
+            return;
+        }
+
         if (strcmp(argv[1], "reload") == 0) {
             license_reload();
             kprintf("license: registry reloaded, issued=%u revoked=%u\n",
@@ -1375,25 +1511,9 @@ static void execute_line(char *input) {
         }
 
         if (strcmp(argv[1], "unlock") == 0) {
-            if (!license_usage_allowed()) {
-                kprintf("license: unlock denied. requires verified consumer monthly license and accepted terms.\n");
+            if (!license_unlock_runtime()) {
                 return;
             }
-            if (security_lockdown_active()) {
-                kprintf("license: unlock denied. security lockdown active; clear failsafe first.\n");
-                return;
-            }
-            const char *profile = config_get("boot.profile");
-            if (!profile) {
-                profile = "normal";
-            }
-            if (!apply_profile_runtime(profile)) {
-                kprintf("license: unlock failed to start desktop services\n");
-                return;
-            }
-            g_license_lock_mode = 0;
-            sync_security_lock_mode();
-            kprintf("license: system unlocked (profile=%s)\n", profile);
             return;
         }
 
@@ -1402,6 +1522,7 @@ static void execute_line(char *input) {
         kprintf("  license terms\n");
         kprintf("  license accept\n");
         kprintf("  license reject\n");
+        kprintf("  license setup\n");
         kprintf("  license verify <key>\n");
         kprintf("  license activate <key>\n");
         kprintf("  license deactivate\n");
@@ -2842,6 +2963,8 @@ void shell_init(void) {
     line[0] = '\0';
     g_license_lock_mode = license_usage_allowed() ? 0 : 1;
     g_security_lock_mode = security_lockdown_active() ? 1 : 0;
+    g_license_setup_active = 0;
+    g_license_setup_attempts = 0;
     server_load_endpoint();
     server_load_features();
     if (g_license_lock_mode || g_security_lock_mode) {
@@ -2855,7 +2978,11 @@ void shell_init(void) {
     } else {
         kprintf("QuartzOS shell ready. type 'help'.\n");
     }
-    print_prompt();
+    if (g_license_lock_mode) {
+        start_license_setup_app(1);
+    } else {
+        print_prompt();
+    }
 }
 
 void shell_tick(void) {
@@ -2864,10 +2991,14 @@ void shell_tick(void) {
         if (c == '\n') {
             console_putc('\n');
             line[line_len] = '\0';
-            execute_line(line);
+            if (g_license_setup_active) {
+                handle_license_setup_line(line);
+            } else {
+                execute_line(line);
+                print_prompt();
+            }
             line_len = 0;
             line[0] = '\0';
-            print_prompt();
         } else if (c == '\b') {
             if (line_len > 0) {
                 line_len--;

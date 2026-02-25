@@ -137,6 +137,71 @@ static void draw_aero_orb_icon(int cx, int cy, int r, uint32_t c0, uint32_t c1, 
     }
 }
 
+static void draw_quartz_logo_mark(int cx, int cy, int r, uint32_t center_bg, int active) {
+    if (r < 6) {
+        return;
+    }
+
+    const uint32_t ring_colors[6] = {
+        0x0079d8ff, 0x0056a8ff, 0x00466eff,
+        0x007885ff, 0x00a16eff, 0x0077d7ff
+    };
+    int inner = r - (r / 3);
+    if (inner < 3) {
+        inner = 3;
+    }
+    int outer = r + 2;
+    int inner2 = inner * inner;
+    int outer2 = outer * outer;
+
+    int halo = r + 4;
+    int halo2 = halo * halo;
+    for (int y = -halo; y <= halo; y++) {
+        for (int x = -halo; x <= halo; x++) {
+            int d2 = x * x + y * y;
+            if (d2 <= halo2 && d2 >= outer2) {
+                uint8_t t = (uint8_t)(((d2 - outer2) * 255) / ((halo2 - outer2) ? (halo2 - outer2) : 1));
+                uint8_t s = (uint8_t)(active ? (172 - t / 2) : (138 - t / 2));
+                fb_put_pixel((uint32_t)(cx + x), (uint32_t)(cy + y), rgb_scale(0x005f9eff, s));
+            }
+        }
+    }
+
+    for (int y = -outer; y <= outer; y++) {
+        for (int x = -outer; x <= outer; x++) {
+            int d2 = x * x + y * y;
+            if (d2 > outer2 || d2 < inner2) {
+                continue;
+            }
+
+            int sector = 0;
+            if (y < 0 && x >= 0) {
+                sector = (x > -y) ? 0 : 1;
+            } else if (x < 0 && y <= 0) {
+                sector = (-x > -y) ? 2 : 3;
+            } else if (x <= 0 && y > 0) {
+                sector = (-x > y) ? 4 : 5;
+            } else {
+                sector = (x > y) ? 0 : 5;
+            }
+
+            uint32_t c = ring_colors[sector];
+            uint8_t depth = (uint8_t)(255 - ((d2 - inner2) * 90) / ((outer2 - inner2) ? (outer2 - inner2) : 1));
+            c = rgb_scale(c, active ? depth : (uint8_t)(depth - 22));
+            fb_put_pixel((uint32_t)(cx + x), (uint32_t)(cy + y), c);
+        }
+    }
+
+    for (int i = 0; i < 6; i++) {
+        int dx = ((i == 0) || (i == 5)) ? r / 2 : ((i == 1) || (i == 2) ? 0 : -r / 2);
+        int dy = (i == 0) ? -r / 2 : ((i == 1) ? -r / 3 : ((i == 2) ? r / 3 : ((i == 3) ? r / 2 : ((i == 4) ? r / 3 : -r / 3))));
+        draw_filled_ellipse(cx + dx, cy + dy, r / 3, r / 4, rgb_scale(ring_colors[i], (uint8_t)(active ? 220 : 184)));
+    }
+
+    draw_filled_ellipse(cx, cy, inner - 1, inner - 1, center_bg);
+    draw_filled_ellipse(cx - r / 3, cy - r / 3, r / 4, r / 6, 0x00f0f8ff);
+}
+
 static int console_panel_height_for_screen(int h) {
     int panel_h = h / 4;
     if (panel_h < 120) {

@@ -118,6 +118,9 @@ SECURITY_MANIFEST := $(BUILD_DIR)/autogen/security_manifest.txt
 SECURITY_MANIFEST_SIG := $(BUILD_DIR)/autogen/security_manifest.sig
 GUI_ASSET_MANIFEST := assets/gui/manifest.csv
 GUI_ASSETS_DIR := assets/gui
+BRANDING_ASSETS_DIR := assets/branding
+BRANDING_MARK_SRC := $(BRANDING_ASSETS_DIR)/quartzos-mark.svg
+BRANDING_LOGO_SRC := $(BRANDING_ASSETS_DIR)/quartzos-logo.svg
 COMPAT_WRAP_DIR := $(BUILD_DIR)/compat
 COMPAT_WRAPPERS := $(COMPAT_WRAP_DIR)/secdiag_win.exe $(COMPAT_WRAP_DIR)/secdiag_mac.app $(COMPAT_WRAP_DIR)/secdiag_linux.bin
 COMPAT_ROOTFS_MAPS := /bin/secdiag_win.exe=$(COMPAT_WRAP_DIR)/secdiag_win.exe /bin/secdiag_mac.app=$(COMPAT_WRAP_DIR)/secdiag_mac.app /bin/secdiag_linux.bin=$(COMPAT_WRAP_DIR)/secdiag_linux.bin
@@ -196,7 +199,7 @@ $(COMPAT_WRAP_DIR)/secdiag_linux.bin: $(BUILD_DIR)/apps/named/secdiag.elf tools/
 	@mkdir -p $(dir $@)
 	$(PY) tools/wrap_compat_app.py --input-elf $< --platform linux --output $@
 
-$(SECURITY_MANIFEST): tools/generate_security_manifest.py $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(SYSTEM_CONFIG_SRC) $(GUI_ASSET_MANIFEST) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST)
+$(SECURITY_MANIFEST): tools/generate_security_manifest.py $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(SYSTEM_CONFIG_SRC) $(GUI_ASSET_MANIFEST) $(BRANDING_MARK_SRC) $(BRANDING_LOGO_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST)
 	@mkdir -p $(dir $@)
 	$(PY) tools/generate_security_manifest.py --output $(SECURITY_MANIFEST) \
 		--signature $(SECURITY_MANIFEST_SIG) \
@@ -208,6 +211,8 @@ $(SECURITY_MANIFEST): tools/generate_security_manifest.py $(LICENSE_TEXT_SRC) $(
 		--add /etc/system.cfg=$(SYSTEM_CONFIG_SRC) \
 		--add /etc/ecosystem_index.csv=$(ECOSYSTEM_INDEX) \
 		--add /etc/ecosystem_index.txt=$(ECOSYSTEM_LIST) \
+		--add /assets/branding/quartzos-mark.svg=$(BRANDING_MARK_SRC) \
+		--add /assets/branding/quartzos-logo.svg=$(BRANDING_LOGO_SRC) \
 		--add /assets/gui/manifest.csv=$(GUI_ASSET_MANIFEST)
 
 $(SECURITY_MANIFEST_SIG): $(SECURITY_MANIFEST)
@@ -215,12 +220,13 @@ $(SECURITY_MANIFEST_SIG): $(SECURITY_MANIFEST)
 gui-assets:
 	$(PY) tools/generate_gui_assets.py
 
-$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(COMPAT_WRAPPERS) $(SECURITY_MANIFEST) $(SECURITY_MANIFEST_SIG) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(SYSTEM_CONFIG_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST)
+$(ROOTFS_IMG): tools/mkrootfs.py $(ECOSYSTEM_MANIFEST) $(APP_ELFS) $(COMPAT_WRAPPERS) $(SECURITY_MANIFEST) $(SECURITY_MANIFEST_SIG) $(LICENSE_TEXT_SRC) $(LICENSE_DB_SRC) $(LICENSE_REVOKED_SRC) $(LICENSE_NOTICE_SRC) $(LICENSE_INTEGRITY_SRC) $(SYSTEM_CONFIG_SRC) $(ECOSYSTEM_SRC) $(ECOSYSTEM_INDEX) $(ECOSYSTEM_LIST) $(GUI_ASSET_MANIFEST) $(BRANDING_MARK_SRC) $(BRANDING_LOGO_SRC)
 	@mkdir -p $(dir $@)
 	$(PY) tools/mkrootfs.py $@ \
 		$(foreach map,$(ROOTFS_APP_MAPS),--add $(map)) \
 		$(foreach map,$(ROOTFS_EXTRA_MAPS),--add $(map)) \
-		--add-tree /assets/gui=$(GUI_ASSETS_DIR)
+		--add-tree /assets/gui=$(GUI_ASSETS_DIR) \
+		--add-tree /assets/branding=$(BRANDING_ASSETS_DIR)
 
 rootfs: $(ROOTFS_IMG)
 

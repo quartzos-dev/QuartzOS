@@ -92,7 +92,8 @@ static void draw_top_bar(int w) {
     uint32_t sbg = start_menu_open ? 0x005681bd : 0x00354d70;
     fb_fill_rect(sx, sy, start_button_w(), start_button_h(), sbg);
     fb_fill_rect(sx, sy, start_button_w(), 1, 0x00dceeff);
-    fb_draw_text(sx + 8, sy + 7, "QuartzOS", 0x00f8fcff, sbg);
+    draw_quartz_logo_mark(sx + 12, sy + start_button_h() / 2, 8, sbg, start_menu_open);
+    fb_draw_text(sx + 24, sy + 7, "QuartzOS", 0x00f8fcff, sbg);
 
     int lx = launcher_button_x();
     uint32_t lbg = launcher_open ? 0x004f79b8 : 0x002e4563;
@@ -215,7 +216,7 @@ static int start_button_y(void) {
 }
 
 static int start_button_w(void) {
-    return 82;
+    return 104;
 }
 
 static int start_button_h(void) {

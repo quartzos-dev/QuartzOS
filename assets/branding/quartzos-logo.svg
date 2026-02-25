@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-label="QuartzOS logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07112a"/>
+      <stop offset="1" stop-color="#0b1028"/>
+    </linearGradient>
+    <linearGradient id="qg1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7cd8ff"/>
+      <stop offset="1" stop-color="#29bfff"/>
+    </linearGradient>
+    <linearGradient id="qg2" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9fc7ff"/>
+      <stop offset="1" stop-color="#4f83ff"/>
+    </linearGradient>
+    <linearGradient id="qg3" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#74e6ff"/>
+      <stop offset="1" stop-color="#3b5fff"/>
+    </linearGradient>
+    <linearGradient id="qg4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#73a0ff"/>
+      <stop offset="1" stop-color="#b26df9"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#dfe7f4"/>
+      <stop offset="0.68" stop-color="#e8eef8"/>
+      <stop offset="0.82" stop-color="#43a6ff"/>
+      <stop offset="1" stop-color="#b06bff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="420" rx="26" fill="url(#bg)"/>
+
+  <g transform="translate(178,38)">
+    <g fill="none" stroke-linecap="round" stroke-width="34">
+      <circle cx="152" cy="128" r="90" stroke="url(#qg1)" stroke-dasharray="112 520" transform="rotate(6 152 128)"/>
+      <circle cx="152" cy="128" r="90" stroke="url(#qg2)" stroke-dasharray="112 520" transform="rotate(66 152 128)"/>
+      <circle cx="152" cy="128" r="90" stroke="url(#qg3)" stroke-dasharray="112 520" transform="rotate(126 152 128)"/>
+      <circle cx="152" cy="128" r="90" stroke="url(#qg4)" stroke-dasharray="112 520" transform="rotate(186 152 128)"/>
+      <circle cx="152" cy="128" r="90" stroke="url(#qg1)" stroke-dasharray="112 520" transform="rotate(246 152 128)"/>
+      <circle cx="152" cy="128" r="90" stroke="url(#qg2)" stroke-dasharray="112 520" transform="rotate(306 152 128)"/>
+    </g>
+    <circle cx="152" cy="128" r="58" fill="#0b1127"/>
+  </g>
+
+  <text x="600" y="320" text-anchor="middle" font-family="SF Pro Display, SF Pro Text, Segoe UI, sans-serif" font-size="116" font-weight="600" fill="url(#word)">QuartzOS</text>
+</svg>

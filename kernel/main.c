@@ -201,6 +201,105 @@ static const boot_profile_t PROFILE_PERF = {
     .net_policy = SERVICE_POLICY_ALWAYS
 };
 
+static uint8_t boot_clamp_u8(int v) {
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 255) {
+        return 255;
+    }
+    return (uint8_t)v;
+}
+
+static uint32_t boot_rgb_mix(uint32_t a, uint32_t b, uint8_t t) {
+    uint32_t ar = (a >> 16) & 0xFFu;
+    uint32_t ag = (a >> 8) & 0xFFu;
+    uint32_t ab = a & 0xFFu;
+    uint32_t br = (b >> 16) & 0xFFu;
+    uint32_t bg = (b >> 8) & 0xFFu;
+    uint32_t bb = b & 0xFFu;
+    uint32_t r = (ar * (255u - t) + br * t) / 255u;
+    uint32_t g = (ag * (255u - t) + bg * t) / 255u;
+    uint32_t bl = (ab * (255u - t) + bb * t) / 255u;
+    return (r << 16) | (g << 8) | bl;
+}
+
+static uint32_t boot_rgb_add(uint32_t c, int add) {
+    int r = (int)((c >> 16) & 0xFFu) + add;
+    int g = (int)((c >> 8) & 0xFFu) + add;
+    int b = (int)(c & 0xFFu) + add;
+    return ((uint32_t)boot_clamp_u8(r) << 16) |
+           ((uint32_t)boot_clamp_u8(g) << 8) |
+           (uint32_t)boot_clamp_u8(b);
+}
+
+static void boot_draw_filled_ellipse(int cx, int cy, int rx, int ry, uint32_t color) {
+    if (rx <= 0 || ry <= 0) {
+        return;
+    }
+    int rx2 = rx * rx;
+    int ry2 = ry * ry;
+    int rr = rx2 * ry2;
+    for (int y = -ry; y <= ry; y++) {
+        int yy = y * y;
+        for (int x = -rx; x <= rx; x++) {
+            int xx = x * x;
+            if (xx * ry2 + yy * rx2 <= rr) {
+                fb_put_pixel((uint32_t)(cx + x), (uint32_t)(cy + y), color);
+            }
+        }
+    }
+}
+
+static void boot_draw_quartz_logo_mark(int cx, int cy, int r, uint32_t center_bg) {
+    if (r < 10) {
+        return;
+    }
+
+    const uint32_t c0 = 0x0079d8ff;
+    const uint32_t c1 = 0x0056a8ff;
+    const uint32_t c2 = 0x00466eff;
+    const uint32_t c3 = 0x00a16eff;
+    const int outer = r;
+    const int inner = r - (r / 3);
+    const int outer2 = outer * outer;
+    const int inner2 = inner * inner;
+
+    for (int y = -outer - 3; y <= outer + 3; y++) {
+        for (int x = -outer - 3; x <= outer + 3; x++) {
+            int d2 = x * x + y * y;
+            if (d2 <= (outer + 3) * (outer + 3) && d2 > outer2) {
+                uint8_t fade = (uint8_t)(195 - ((d2 - outer2) * 120) / (((outer + 3) * (outer + 3) - outer2) ? ((outer + 3) * (outer + 3) - outer2) : 1));
+                fb_put_pixel((uint32_t)(cx + x), (uint32_t)(cy + y), boot_rgb_mix(c0, center_bg, (uint8_t)(255 - fade)));
+            }
+        }
+    }
+
+    for (int y = -outer; y <= outer; y++) {
+        for (int x = -outer; x <= outer; x++) {
+            int d2 = x * x + y * y;
+            if (d2 > outer2 || d2 < inner2) {
+                continue;
+            }
+            uint32_t tone;
+            if (y < 0 && x >= 0) {
+                tone = boot_rgb_mix(c0, c1, (uint8_t)((x * 255) / (outer ? outer : 1)));
+            } else if (x < 0 && y <= 0) {
+                tone = boot_rgb_mix(c1, c2, (uint8_t)((-x * 255) / (outer ? outer : 1)));
+            } else if (x <= 0 && y > 0) {
+                tone = boot_rgb_mix(c2, c3, (uint8_t)((y * 255) / (outer ? outer : 1)));
+            } else {
+                tone = boot_rgb_mix(c3, c0, (uint8_t)((x * 255) / (outer ? outer : 1)));
+            }
+            tone = boot_rgb_add(tone, 12 - (d2 * 12) / (outer2 ? outer2 : 1));
+            fb_put_pixel((uint32_t)(cx + x), (uint32_t)(cy + y), tone);
+        }
+    }
+
+    boot_draw_filled_ellipse(cx, cy, inner - 2, inner - 2, center_bg);
+    boot_draw_filled_ellipse(cx - r / 3, cy - r / 3, r / 4, r / 6, 0x00ecf7ff);
+}
+
 static void boot_splash(const char *phase, uint32_t step, uint32_t total) {
     uint32_t w = fb_width();
     uint32_t h = fb_height();
@@ -226,10 +325,11 @@ static void boot_splash(const char *phase, uint32_t step, uint32_t total) {
     fb_fill_rect(x, y, card_w, 1, 0x0089b7ea);
     fb_fill_rect(x, y + card_h - 1, card_w, 1, 0x00080f18);
 
-    fb_draw_text(x + 20, y + 24, "QuartzOS Boot", 0x00edf6ff, 0x00131e2f);
-    fb_draw_text(x + 20, y + 46, "Initializing desktop services...", 0x00bfd7ee, 0x00131e2f);
-    fb_draw_text(x + 20, y + 76, "Current stage:", 0x00b7cde3, 0x00131e2f);
-    fb_draw_text(x + 130, y + 76, phase ? phase : "working", 0x00e5f2ff, 0x00131e2f);
+    boot_draw_quartz_logo_mark(x + 42, y + 40, 18, 0x00131e2f);
+    fb_draw_text(x + 76, y + 24, "QuartzOS Boot", 0x00edf6ff, 0x00131e2f);
+    fb_draw_text(x + 76, y + 46, "Initializing desktop services...", 0x00bfd7ee, 0x00131e2f);
+    fb_draw_text(x + 76, y + 76, "Current stage:", 0x00b7cde3, 0x00131e2f);
+    fb_draw_text(x + 186, y + 76, phase ? phase : "working", 0x00e5f2ff, 0x00131e2f);
 
     if (total == 0) {
         total = 1;
@@ -270,11 +370,12 @@ static void show_unlicensed_boot_notice(void) {
     kprintf("LICENSE: lock mode active. verified consumer monthly license required.\n");
 
     fb_clear(0x00101826);
-    fb_draw_text(36, 46, "QuartzOS license lock", 0x00f2f8ff, 0x00101826);
-    fb_draw_text(36, 68, "No verified active license found.", 0x00e2c8b0, 0x00101826);
-    fb_draw_text(36, 86, "Minimum required: Consumer monthly license (QOS3).", 0x00d7bca6, 0x00101826);
-    fb_draw_text(36, 112, "Use shell commands: license terms / accept / activate / unlock", 0x00b8cbe0, 0x00101826);
-    fb_draw_text(36, 128, "GUI and network stay locked until verification passes.", 0x00b8cbe0, 0x00101826);
+    boot_draw_quartz_logo_mark(52, 62, 16, 0x00101826);
+    fb_draw_text(80, 46, "QuartzOS license lock", 0x00f2f8ff, 0x00101826);
+    fb_draw_text(80, 68, "No verified active license found.", 0x00e2c8b0, 0x00101826);
+    fb_draw_text(80, 86, "Minimum required: Consumer monthly license (QOS3).", 0x00d7bca6, 0x00101826);
+    fb_draw_text(80, 112, "Use shell commands: license terms / accept / activate / unlock", 0x00b8cbe0, 0x00101826);
+    fb_draw_text(80, 128, "GUI and network stay locked until verification passes.", 0x00b8cbe0, 0x00101826);
     fb_present();
 }
 

@@ -10,6 +10,7 @@ BOOT_ORDER=${QEMU_BOOT_ORDER:-d}
 SERIAL_MODE=${QEMU_SERIAL_MODE:-file}
 SERIAL_LOG=${QEMU_SERIAL_LOG:-"$ROOT_DIR/build/qemu-serial.log"}
 DISPLAY_MODE=${QEMU_DISPLAY_MODE:-auto}
+INPUT_MODE=${QEMU_INPUT_MODE:-auto}
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   echo "error: qemu-system-x86_64 not found in PATH" >&2
@@ -55,6 +56,25 @@ case "$SERIAL_MODE" in
     ;;
 esac
 
+input_arg=()
+case "$INPUT_MODE" in
+  auto)
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      input_arg=(-usb -device usb-kbd -device usb-tablet)
+    fi
+    ;;
+  usb)
+    input_arg=(-usb -device usb-kbd -device usb-tablet)
+    ;;
+  ps2)
+    input_arg=()
+    ;;
+  *)
+    echo "error: QEMU_INPUT_MODE must be one of: auto, usb, ps2" >&2
+    exit 1
+    ;;
+esac
+
 echo "Launching QEMU..."
 if [[ ${#display_arg[@]} -gt 0 ]]; then
   echo "display: ${display_arg[*]}"
@@ -73,6 +93,7 @@ qemu-system-x86_64 \
   -smp 4 \
   -m 1024 \
   -vga std \
+  "${input_arg[@]}" \
   "${display_arg[@]}" \
   -boot order="$BOOT_ORDER",menu=on \
   -cdrom "$ISO" \
