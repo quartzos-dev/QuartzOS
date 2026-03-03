@@ -12,6 +12,7 @@
 #include <kernel/license.h>
 #include <kernel/log.h>
 #include <kernel/mp.h>
+#include <kernel/platform.h>
 #include <kernel/security.h>
 #include <kernel/shell.h>
 #include <kernel/slog.h>
@@ -261,10 +262,14 @@ static void sync_license_lock_mode(void) {
     }
     g_license_lock_mode = should_lock;
     if (g_license_lock_mode) {
-        (void)service_stop("gui");
+        (void)service_start("gui");
         (void)service_stop("net");
         (void)service_set_policy("net", SERVICE_POLICY_MANUAL);
-        kprintf("license: enforcement lock enabled (consumer monthly license required)\n");
+        kprintf("license: enforcement lock enabled (license app active)\n");
+        if (platform_is_virtual_machine()) {
+            platform_request_host_license_activation();
+            kprintf("license: VM host activation requested\n");
+        }
         audit_log("LICENSE_LOCK_MODE", "enabled");
     } else {
         kprintf("license: verification passed, full access enabled\n");
@@ -674,14 +679,14 @@ static void print_license_setup_prompt(void) {
     kprintf("\nlicense-key> ");
 }
 
-static int license_unlock_runtime(void) {
+bool shell_unlock_runtime_services(void) {
     if (!license_usage_allowed()) {
         kprintf("license: unlock denied. requires verified consumer monthly license and accepted terms.\n");
-        return 0;
+        return false;
     }
     if (security_lockdown_active()) {
         kprintf("license: unlock denied. security lockdown active; clear failsafe first.\n");
-        return 0;
+        return false;
     }
     const char *profile = config_get("boot.profile");
     if (!profile) {
@@ -689,12 +694,17 @@ static int license_unlock_runtime(void) {
     }
     if (!apply_profile_runtime(profile)) {
         kprintf("license: unlock failed to start desktop services\n");
-        return 0;
+        return false;
     }
     g_license_lock_mode = 0;
+    g_license_setup_active = 0;
+    g_license_setup_attempts = 0;
+    line_len = 0;
+    line[0] = '\0';
+    platform_clear_host_license_activation_request();
     sync_security_lock_mode();
     kprintf("license: system unlocked (profile=%s)\n", profile);
-    return 1;
+    return true;
 }
 
 static int license_setup_activate_and_unlock(const char *key) {
@@ -720,7 +730,7 @@ static int license_setup_activate_and_unlock(const char *key) {
         return 0;
     }
     kprintf("license setup: key activated\n");
-    return license_unlock_runtime();
+    return shell_unlock_runtime_services() ? 1 : 0;
 }
 
 static void start_license_setup_app(int auto_started) {
@@ -1511,7 +1521,7 @@ static void execute_line(char *input) {
         }
 
         if (strcmp(argv[1], "unlock") == 0) {
-            if (!license_unlock_runtime()) {
+            if (!shell_unlock_runtime_services()) {
                 return;
             }
             return;
@@ -2979,13 +2989,24 @@ void shell_init(void) {
         kprintf("QuartzOS shell ready. type 'help'.\n");
     }
     if (g_license_lock_mode) {
-        start_license_setup_app(1);
+        if (platform_is_virtual_machine()) {
+            kprintf("LICENSE: VM detected; using host License Activation app for activation.\n");
+            platform_request_host_license_activation();
+            print_prompt();
+        } else {
+            start_license_setup_app(1);
+        }
     } else {
         print_prompt();
     }
 }
 
 void shell_tick(void) {
+    if (gui_license_input_active()) {
+        task_schedule_if_needed();
+        return;
+    }
+
     char c;
     while (keyboard_read_char(&c)) {
         if (c == '\n') {

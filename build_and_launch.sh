@@ -14,6 +14,12 @@ Options:
   --clean        Remove previous build artifacts before building
   --serial-only  Run without GUI output (terminal/serial mode)
   --help         Show this help message
+
+Environment:
+  QEMU_NET_MODE=user|none  QEMU network backend (default: user)
+  QEMU_HOST_LICENSE_APP=auto|on|off  auto-open host License Activation app on VM lock mode
+  QEMU_HOST_LICENSE_APP_PATH=/path/to/QuartzOS\ License\ Activation.app
+  QEMU_HOST_LICENSE_APP_BUILD_SCRIPT=/path/to/build_macos_activation_app.sh
 EOF
 }
 
@@ -47,19 +53,7 @@ fi
 
 make iso disk
 if [[ $SERIAL_ONLY -eq 1 ]]; then
-  exec qemu-system-x86_64 \
-    -M pc \
-    -accel tcg \
-    -smp 4 \
-    -m 1024 \
-    -vga std \
-    -cdrom build/quartzos.iso \
-    -drive file=build/quartzos_disk.img,format=raw,if=ide,index=0 \
-    -netdev user,id=net0 -device e1000,netdev=net0 \
-    -serial stdio \
-    -display none \
-    -no-reboot \
-    -no-shutdown
+  QEMU_SERIAL_MODE=stdio QEMU_DISPLAY_MODE=none exec ./tools/run-qemu.sh build/quartzos.iso build/quartzos_disk.img
 fi
 
 exec ./tools/run-qemu.sh build/quartzos.iso build/quartzos_disk.img

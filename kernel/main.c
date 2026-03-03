@@ -21,6 +21,7 @@
 #include <kernel/log.h>
 #include <kernel/mp.h>
 #include <kernel/panic.h>
+#include <kernel/platform.h>
 #include <kernel/security.h>
 #include <kernel/shell.h>
 #include <kernel/slog.h>
@@ -515,9 +516,13 @@ void kernel_main(void) {
     pit_init(100);
     stack_protector_seed();
     cpu_hardening_init();
+    platform_detect();
     kprintf("CPU: hardening smep=%s smap=%s\n",
             cpu_hardening_smep_enabled() ? "on" : "off",
             cpu_hardening_smap_enabled() ? "on" : "off");
+    kprintf("PLATFORM: vm=%s vendor=%s\n",
+            platform_is_virtual_machine() ? "yes" : "no",
+            platform_vm_vendor());
     keyboard_init();
     mouse_init((int)fb_width(), (int)fb_height());
     ata_init();
@@ -615,6 +620,10 @@ void kernel_main(void) {
             license_ready ? "yes" : "no");
     if (!license_ready) {
         kprintf("LICENSE: enforcement lock active (requires verified consumer monthly license)\n");
+        if (platform_is_virtual_machine()) {
+            kprintf("LICENSE: VM detected, requesting host License Activation app launch\n");
+            platform_request_host_license_activation();
+        }
         audit_log("LICENSE_BOOT_LOCK", "minimum-consumer-monthly");
         show_unlicensed_boot_notice();
     }
@@ -645,15 +654,12 @@ void kernel_main(void) {
         panic("Missing shell service task id");
     }
 
-    uint64_t gui_id = 0;
-    if (license_ready && security_ready) {
-        if (!service_start("gui")) {
-            panic("Failed to create GUI task");
-        }
-        gui_id = service_task_id("gui");
-        if (gui_id == 0) {
-            panic("Missing GUI service task id");
-        }
+    if (!service_start("gui")) {
+        panic("Failed to create GUI task");
+    }
+    uint64_t gui_id = service_task_id("gui");
+    if (gui_id == 0) {
+        panic("Missing GUI service task id");
     }
 
     if (license_ready && security_ready) {
@@ -687,7 +693,10 @@ void kernel_main(void) {
             lock_profile = "license-lock";
         }
         kprintf("BOOT: profile=%s\n", lock_profile);
-        kprintf("GUI: desktop service disabled in lock mode\n");
+        kprintf("GUI: lock screen active (License Activation app)\n");
+        if (!license_ready && platform_is_virtual_machine()) {
+            kprintf("GUI: VM mode uses host-side license activation app\n");
+        }
         kprintf("LICENSE: unlock with: license terms -> license accept -> license activate <QOS3-key> -> license unlock\n");
         if (!security_ready) {
             kprintf("SECURITY: unlock with: security status -> security verify -> security failsafe reset all\n");

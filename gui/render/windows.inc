@@ -343,11 +343,110 @@ static void cursor_present_only(const mouse_state_t *mouse) {
     cursor_draw_front(mouse);
 }
 
+static void draw_license_lock_screen(int sw, int sh) {
+    (void)sw;
+    (void)sh;
+    int host_mode = license_vm_host_mode();
+
+    int px = license_panel_x();
+    int py = license_panel_y();
+    int pw = license_panel_w();
+    int ph = license_panel_h();
+
+    fb_fill_rect(px - 2, py - 2, pw + 4, ph + 4, 0x00070d17);
+    fb_fill_rect(px, py, pw, ph, 0x00101a2a);
+    fb_fill_rect(px + 1, py + 1, pw - 2, 30, 0x00386bb0);
+    fb_fill_rect(px + 1, py + 31, pw - 2, ph - 32, 0x00131f31);
+    fb_fill_rect(px, py, pw, 1, 0x0094c9ff);
+    fb_fill_rect(px, py + ph - 1, pw, 1, 0x00233854);
+    fb_fill_rect(px, py, 1, ph, 0x0094c9ff);
+    fb_fill_rect(px + pw - 1, py, 1, ph, 0x00233854);
+
+    fb_draw_text(px + 16, py + 10, "QuartzOS License Activation", 0x00f4fbff, 0x00386bb0);
+    fb_draw_text(px + 16, py + 44, "A verified Consumer Monthly license is required to continue.", 0x00d2e4f5, 0x00131f31);
+    fb_draw_text(px + 16, py + 60, "Use keyboard typing or click the key buttons below.", 0x00bdd3e8, 0x00131f31);
+
+    const char *lock_reason = security_lockdown_active()
+        ? "Security lockdown is active. Clear failsafes in CLI if unlock is denied."
+        : "Security state normal.";
+    fb_draw_text(px + 16, py + 76, lock_reason, security_lockdown_active() ? 0x00f6b3b3 : 0x00a9d6b3, 0x00131f31);
+    if (host_mode) {
+        fb_draw_text(px + 16, py + 92, "VM mode: using host License Activation app.", 0x00b8d4ef, 0x00131f31);
+        fb_draw_text(px + 16, py + 110, "A launch request is emitted to QEMU serial when lock mode starts.", 0x00aac6e1, 0x00131f31);
+        fb_draw_text(px + 16, py + 128, "Use launch script with serial=file to auto-open host app on macOS.", 0x00aac6e1, 0x00131f31);
+
+        int ay2 = license_action_row2_y();
+        fb_fill_rect(license_btn_activate_x(), ay2, license_btn_activate_w(), license_button_h(), 0x003d6ea7);
+        fb_draw_text(license_btn_activate_x() + 12, ay2 + 10, "Open Host License App", 0x00eef7ff, 0x003d6ea7);
+    } else {
+        fb_draw_text(px + 16, py + 92, license_terms_accepted() ? "Terms: accepted" : "Terms: pending", license_terms_accepted() ? 0x00a9d6b3 : 0x00f2cf8b, 0x00131f31);
+
+        int fx = license_field_x();
+        int fy = license_field_y();
+        int fw = license_field_w();
+        int fh = license_field_h();
+        fb_fill_rect(fx, fy, fw, fh, 0x000f1928);
+        fb_fill_rect(fx, fy, fw, 1, 0x0079a7d4);
+        fb_fill_rect(fx, fy + fh - 1, fw, 1, 0x0023374d);
+        fb_fill_rect(fx, fy, 1, fh, 0x0079a7d4);
+        fb_fill_rect(fx + fw - 1, fy, 1, fh, 0x0023374d);
+        if (license_lock_key_len > 0) {
+            fb_draw_text(fx + 10, fy + 11, license_lock_key, 0x00e5f2ff, 0x000f1928);
+        } else {
+            fb_draw_text(fx + 10, fy + 11, "Enter QOS3 key...", 0x00869db5, 0x000f1928);
+        }
+
+        for (int i = 0; i < LICENSE_KEYPAD_COUNT; i++) {
+            int bx = license_keypad_button_x(i);
+            int by = license_keypad_button_y(i);
+            fb_fill_rect(bx, by, license_keypad_cell_w(), license_keypad_cell_h(), 0x00243853);
+            fb_fill_rect(bx, by, license_keypad_cell_w(), 1, 0x005784b2);
+            fb_fill_rect(bx, by + license_keypad_cell_h() - 1, license_keypad_cell_w(), 1, 0x001b2e43);
+            fb_fill_rect(bx, by, 1, license_keypad_cell_h(), 0x005784b2);
+            fb_fill_rect(bx + license_keypad_cell_w() - 1, by, 1, license_keypad_cell_h(), 0x001b2e43);
+            char label[2];
+            label[0] = license_keypad_chars[i];
+            label[1] = '\0';
+            fb_draw_text(bx + (license_keypad_cell_w() / 2) - 4, by + 16, label, 0x00e4f3ff, 0x00243853);
+        }
+
+        int ay = license_action_row_y();
+        int ay2 = license_action_row2_y();
+        fb_fill_rect(license_btn_accept_x(), ay, license_btn_accept_w(), license_button_h(), 0x0037644f);
+        fb_draw_text(license_btn_accept_x() + 12, ay + 10, "Accept Terms", 0x00d9f0df, 0x0037644f);
+
+        fb_fill_rect(license_btn_reload_x(), ay, license_btn_reload_w(), license_button_h(), 0x00364f6c);
+        fb_draw_text(license_btn_reload_x() + 12, ay + 10, "Reload DB", 0x00d5e8fb, 0x00364f6c);
+
+        fb_fill_rect(license_btn_backspace_x(), ay, license_btn_backspace_w(), license_button_h(), 0x004d3e63);
+        fb_draw_text(license_btn_backspace_x() + 12, ay + 10, "Backspace", 0x00e9dcf9, 0x004d3e63);
+
+        fb_fill_rect(license_btn_clear_x(), ay, license_btn_clear_w(), license_button_h(), 0x00523f47);
+        fb_draw_text(license_btn_clear_x() + 14, ay + 10, "Clear", 0x00f4d9e0, 0x00523f47);
+
+        fb_fill_rect(license_btn_activate_x(), ay2, license_btn_activate_w(), license_button_h(), 0x003d6ea7);
+        fb_draw_text(license_btn_activate_x() + 12, ay2 + 10, "Activate + Unlock", 0x00eef7ff, 0x003d6ea7);
+    }
+
+    fb_fill_rect(px + 16, py + ph - 54, pw - 32, 30, 0x00111d2c);
+    fb_draw_text(px + 24, py + ph - 43, license_lock_status[0] ? license_lock_status : "Ready.", license_lock_status_color ? license_lock_status_color : 0x00b9d9f4, 0x00111d2c);
+}
+
 static void gui_redraw(const mouse_state_t *mouse) {
     uint32_t w = fb_width();
     uint32_t h = fb_height();
 
     draw_background(w, h);
+    if (license_lock_active()) {
+        draw_license_lock_screen((int)w, (int)h);
+        fb_present();
+        cursor_prev_valid = 0;
+        if (mouse) {
+            cursor_draw_front(mouse);
+        }
+        return;
+    }
+
     draw_top_bar((int)w);
     draw_dock((int)w, (int)h);
 

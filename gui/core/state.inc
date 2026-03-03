@@ -31,6 +31,10 @@ enum {
 #define TITLE_H 24
 #define FRAME_TARGET_TICKS 1
 #define FILE_CACHE_TICKS 120
+#define LICENSE_UI_STATUS_MAX 128
+#define LICENSE_KEYPAD_COLS 5
+#define LICENSE_KEYPAD_ROWS 4
+#define LICENSE_KEYPAD_COUNT (LICENSE_KEYPAD_COLS * LICENSE_KEYPAD_ROWS)
 
 enum {
     SNAP_NONE = 0,
@@ -178,3 +182,14 @@ static char file_cache_bin[224];
 static char file_cache_assets[224];
 static uint64_t file_cache_tick;
 static int file_cache_valid;
+static int license_lock_ui_capture;
+static char license_lock_key[LICENSE_MAX_KEY_TEXT + 1];
+static int license_lock_key_len;
+static char license_lock_status[LICENSE_UI_STATUS_MAX];
+static uint32_t license_lock_status_color;
+static const char license_keypad_chars[LICENSE_KEYPAD_COUNT] = {
+    'Q', 'O', 'S', '-', '0',
+    '1', '2', '3', '4', '5',
+    '6', '7', '8', '9', 'A',
+    'B', 'C', 'D', 'E', 'F'
+};

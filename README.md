@@ -273,6 +273,12 @@ Features:
   `QuartzOS-license-issuer/issue_license.py`.
 - Native macOS issuer app wrapper:
   `QuartzOS-license-issuer/macos_app/build_macos_app.sh`.
+- Public macOS activation app wrapper:
+  `QuartzOS-license-activation/macos_app/build_macos_activation_app.sh`.
+- Security-first all-in-one macOS admin app wrapper:
+  `QuartzOS-admin-console/macos_app/build_macos_admin_app.sh`.
+- The issuer app is dev/admin-only; end users should use
+  `QuartzOS License Activation.app`.
 
 ## Project layout
 
@@ -289,6 +295,8 @@ apps/          userspace app(s)
 assets/        rootfs seed assets (including license database)
 assets/config/ persisted system config seed (includes protected server endpoint keys)
 QuartzOS-license-issuer/ license issuer CLI + macOS app wrapper
+QuartzOS-license-activation/ public activation-only macOS app
+QuartzOS-admin-console/ security-first all-in-one macOS admin app
 server/        server-side security verification daemon + installer
 lib/           freestanding libc subset
 tools/         build helpers (rootfs builder, qemu runner)
@@ -324,6 +332,32 @@ For persistent filesystem backing:
 
 ```bash
 make disk
+```
+
+Full overhaul validation (security + build + boot smoke):
+
+```bash
+make overhaul
+```
+
+Quick integrity checks:
+
+```bash
+make health
+```
+
+Boot smoke test only:
+
+```bash
+make smoke
+```
+
+Build admin console app:
+
+```bash
+make admin-app
+./build_macos_admin_app.sh
+open "/Users/qian/Music/OS/build/QuartzOS Admin Console.app"
 ```
 
 ## Run instructions

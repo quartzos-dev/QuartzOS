@@ -2,6 +2,194 @@ static int point_in_rect(int x, int y, int rx, int ry, int rw, int rh) {
     return x >= rx && x < (rx + rw) && y >= ry && y < (ry + rh);
 }
 
+static int license_lock_active(void) {
+    return !license_usage_allowed() || security_lockdown_active();
+}
+
+static int license_vm_host_mode(void) {
+    return !license_usage_allowed() && platform_is_virtual_machine();
+}
+
+static void license_lock_set_status(const char *text, uint32_t color) {
+    if (!text) {
+        text = "";
+    }
+    strncpy(license_lock_status, text, sizeof(license_lock_status) - 1);
+    license_lock_status[sizeof(license_lock_status) - 1] = '\0';
+    license_lock_status_color = color;
+}
+
+static char license_char_normalize(char c) {
+    if (c >= 'a' && c <= 'z') {
+        return (char)(c - 'a' + 'A');
+    }
+    return c;
+}
+
+static int license_char_allowed(char c) {
+    c = license_char_normalize(c);
+    for (int i = 0; i < LICENSE_KEYPAD_COUNT; i++) {
+        if (license_keypad_chars[i] == c) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void license_key_append(char c) {
+    c = license_char_normalize(c);
+    if (!license_char_allowed(c)) {
+        return;
+    }
+    if (license_lock_key_len >= LICENSE_MAX_KEY_TEXT) {
+        license_lock_set_status("License key is at max length", 0x00f2bd89);
+        return;
+    }
+    license_lock_key[license_lock_key_len++] = c;
+    license_lock_key[license_lock_key_len] = '\0';
+}
+
+static void license_key_backspace(void) {
+    if (license_lock_key_len <= 0) {
+        return;
+    }
+    license_lock_key_len--;
+    license_lock_key[license_lock_key_len] = '\0';
+}
+
+static void license_key_clear(void) {
+    license_lock_key_len = 0;
+    license_lock_key[0] = '\0';
+}
+
+static int license_panel_w(void) {
+    int w = (int)fb_width() - 220;
+    if (w < 720) {
+        w = (int)fb_width() - 40;
+    }
+    if (w > 980) {
+        w = 980;
+    }
+    return w;
+}
+
+static int license_panel_h(void) {
+    int h = (int)fb_height() - 150;
+    if (h < 460) {
+        h = (int)fb_height() - 24;
+    }
+    if (h > 620) {
+        h = 620;
+    }
+    return h;
+}
+
+static int license_panel_x(void) {
+    return ((int)fb_width() - license_panel_w()) / 2;
+}
+
+static int license_panel_y(void) {
+    return ((int)fb_height() - license_panel_h()) / 2;
+}
+
+static int license_field_x(void) {
+    return license_panel_x() + 26;
+}
+
+static int license_field_y(void) {
+    return license_panel_y() + 158;
+}
+
+static int license_field_w(void) {
+    return license_panel_w() - 52;
+}
+
+static int license_field_h(void) {
+    return 34;
+}
+
+static int license_keypad_x(void) {
+    return license_panel_x() + 26;
+}
+
+static int license_keypad_y(void) {
+    return license_panel_y() + 238;
+}
+
+static int license_keypad_cell_w(void) {
+    return 92;
+}
+
+static int license_keypad_cell_h(void) {
+    return 44;
+}
+
+static int license_keypad_gap(void) {
+    return 8;
+}
+
+static int license_keypad_button_x(int index) {
+    int col = index % LICENSE_KEYPAD_COLS;
+    return license_keypad_x() + col * (license_keypad_cell_w() + license_keypad_gap());
+}
+
+static int license_keypad_button_y(int index) {
+    int row = index / LICENSE_KEYPAD_COLS;
+    return license_keypad_y() + row * (license_keypad_cell_h() + license_keypad_gap());
+}
+
+static int license_action_row_y(void) {
+    return license_keypad_y() + LICENSE_KEYPAD_ROWS * (license_keypad_cell_h() + license_keypad_gap()) + 8;
+}
+
+static int license_action_row2_y(void) {
+    return license_action_row_y() + 38;
+}
+
+static int license_button_h(void) {
+    return 30;
+}
+
+static int license_btn_accept_x(void) {
+    return license_panel_x() + 26;
+}
+
+static int license_btn_accept_w(void) {
+    return 150;
+}
+
+static int license_btn_reload_x(void) {
+    return license_btn_accept_x() + license_btn_accept_w() + 10;
+}
+
+static int license_btn_reload_w(void) {
+    return 118;
+}
+
+static int license_btn_backspace_x(void) {
+    return license_btn_reload_x() + license_btn_reload_w() + 10;
+}
+
+static int license_btn_backspace_w(void) {
+    return 130;
+}
+
+static int license_btn_clear_x(void) {
+    return license_btn_backspace_x() + license_btn_backspace_w() + 10;
+}
+
+static int license_btn_clear_w(void) {
+    return 110;
+}
+
+static int license_btn_activate_x(void) {
+    return license_panel_x() + 26;
+}
+
+static int license_btn_activate_w(void) {
+    return license_panel_w() - 52;
+}
+
 static uint8_t clamp_u8(int value) {
     if (value < 0) {
         return 0;

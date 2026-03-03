@@ -99,6 +99,16 @@ def parse_port(text: str, fallback: int) -> int:
     return value
 
 
+def parse_positive_int(text: str, fallback: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(text, 10)
+    except ValueError:
+        return fallback
+    if value < minimum or value > maximum:
+        return fallback
+    return value
+
+
 def canonical_ip_text(text: str) -> Optional[str]:
     try:
         addr = ipaddress.ip_address(text.strip())
@@ -756,7 +766,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-clients",
         type=int,
-        default=parse_port(os.getenv("QOS_SECURITY_MAX_CLIENTS", str(DEFAULT_MAX_CLIENTS)), DEFAULT_MAX_CLIENTS),
+        default=parse_positive_int(
+            os.getenv("QOS_SECURITY_MAX_CLIENTS", str(DEFAULT_MAX_CLIENTS)),
+            DEFAULT_MAX_CLIENTS,
+            1,
+            4096,
+        ),
         help="maximum concurrent client handlers",
     )
     return parser.parse_args()
@@ -806,7 +821,7 @@ def main() -> int:
         allowed_client_nets=allowed_nets,
         store=store,
         reload_interval=max(0.5, args.reload_seconds),
-        max_clients=max(1, args.max_clients),
+        max_clients=parse_positive_int(str(args.max_clients), DEFAULT_MAX_CLIENTS, 1, 4096),
     )
 
     def _signal_handler(signum: int, _frame: object) -> None:
@@ -825,7 +840,7 @@ def main() -> int:
         "yes" if args.require_pin else "no",
         len(allowed_ips),
         len(allowed_nets),
-        max(1, args.max_clients),
+        parse_positive_int(str(args.max_clients), DEFAULT_MAX_CLIENTS, 1, 4096),
     )
     server.run()
     logger.info("stopped")

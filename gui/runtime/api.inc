@@ -7,6 +7,77 @@ bool gui_console_overlay(void) {
     return overlay != 0;
 }
 
+bool gui_license_input_active(void) {
+    return license_lock_ui_capture != 0;
+}
+
+static void gui_license_set_lockout_status(const char *prefix, uint32_t lock_left, uint32_t color) {
+    char sec[16];
+    char msg[LICENSE_UI_STATUS_MAX];
+    sec[0] = '\0';
+    msg[0] = '\0';
+    u32_to_dec(lock_left, sec, sizeof(sec));
+    if (prefix && prefix[0]) {
+        strncat(msg, prefix, sizeof(msg) - strlen(msg) - 1);
+        strncat(msg, " ", sizeof(msg) - strlen(msg) - 1);
+    } else {
+        strncat(msg, "activation-locked ", sizeof(msg) - strlen(msg) - 1);
+    }
+    strncat(msg, "(", sizeof(msg) - strlen(msg) - 1);
+    strncat(msg, sec, sizeof(msg) - strlen(msg) - 1);
+    strncat(msg, "s remaining)", sizeof(msg) - strlen(msg) - 1);
+    license_lock_set_status(msg, color);
+}
+
+static int gui_license_activate_and_unlock(void) {
+    if (license_vm_host_mode()) {
+        platform_clear_host_license_activation_request();
+        platform_request_host_license_activation();
+        license_lock_set_status("Host License Activation app launch requested.", 0x00b9d9f4);
+        return 0;
+    }
+
+    uint32_t lock_left = license_lockout_remaining_seconds();
+    if (lock_left > 0) {
+        gui_license_set_lockout_status("Too many failed attempts", lock_left, 0x00f2bd89);
+        return 0;
+    }
+
+    if (!license_terms_accepted()) {
+        if (!license_accept_terms()) {
+            license_lock_set_status("Terms file missing or invalid", 0x00f3b1b1);
+            return 0;
+        }
+        license_lock_set_status("Terms accepted", 0x00a7e2bd);
+    }
+
+    if (license_lock_key_len <= 0) {
+        license_lock_set_status("Enter a QOS3 key", 0x00f2bd89);
+        return 0;
+    }
+
+    if (!license_activate(license_lock_key)) {
+        uint32_t lock_now = license_lockout_remaining_seconds();
+        if (lock_now > 0) {
+            gui_license_set_lockout_status("Activation locked", lock_now, 0x00f2bd89);
+        } else {
+            license_lock_set_status(license_error_text(license_last_error()), 0x00f3b1b1);
+        }
+        return 0;
+    }
+
+    if (!shell_unlock_runtime_services()) {
+        license_lock_set_status("Activation succeeded, unlock failed", 0x00f2bd89);
+        return 0;
+    }
+
+    license_lock_set_status("License verified. Desktop unlocked.", 0x00a7e2bd);
+    license_lock_ui_capture = 0;
+    license_key_clear();
+    gui_notify_push("License verified: desktop unlocked", 0x0080d8a2);
+    return 1;
+}
+
 static int window_resize_mode_at(const window_t *w, int x, int y) {
     if (!w || w->maximized) {
         return RESIZE_NONE;
@@ -263,6 +334,19 @@ void gui_init(void) {
     gui_notify_push("Launcher ready: click Launcher", 0x008acfa3);
     gui_notify_push("Workspace controls: WS1..WS4 in top bar", 0x0099b8ff);
 
+    license_lock_ui_capture = (!license_usage_allowed() && !license_vm_host_mode()) ? 1 : 0;
+    license_key_clear();
+    if (license_vm_host_mode()) {
+        platform_request_host_license_activation();
+        license_lock_set_status("VM detected: host License Activation app launch requested.", 0x00b9d9f4);
+    } else if (license_terms_accepted()) {
+        license_lock_set_status("Enter your QOS3 key, then click Activate + Unlock.", 0x00b9d9f4);
+    } else if (license_terms_available()) {
+        license_lock_set_status("Accept terms, then enter your QOS3 key.", 0x00f2cf8b);
+    } else {
+        license_lock_set_status("Terms file missing. Use 'license terms' in CLI.", 0x00f3b1b1);
+    }
+
     mouse_state_t mouse = mouse_get_state();
     mouse_prev_left = mouse.left ? 1 : 0;
     mouse_prev_right = mouse.right ? 1 : 0;
@@ -340,6 +424,125 @@ void gui_tick(void) {
     int pressed = mouse.left && !prev_left;
     int released = !mouse.left && prev_left;
     int right_pressed = mouse.right && !prev_right;
+
+    int lock_active_now = license_lock_active();
+    int host_mode = license_vm_host_mode();
+    license_lock_ui_capture = (!license_usage_allowed() && !host_mode) ? 1 : 0;
+    if (lock_active_now) {
+        if (!host_mode && license_last_error() == LICENSE_ERR_LOCKED) {
+            uint32_t lock_left = license_lockout_remaining_seconds();
+            if (lock_left > 0) {
+                gui_license_set_lockout_status("Activation locked", lock_left, 0x00f2bd89);
+            }
+        }
+
+        if (license_lock_ui_capture) {
+            char key_char;
+            while (keyboard_read_char(&key_char)) {
+                if (key_char == '\n') {
+                    (void)gui_license_activate_and_unlock();
+                    dirty = 1;
+                    continue;
+                }
+                if (key_char == '\b') {
+                    license_key_backspace();
+                    dirty = 1;
+                    continue;
+                }
+                if (key_char >= 32 && key_char <= 126) {
+                    int before = license_lock_key_len;
+                    license_key_append(key_char);
+                    if (license_lock_key_len != before) {
+                        dirty = 1;
+                    }
+                }
+            }
+        }
+
+        if (pressed) {
+            int handled = 0;
+            int action_y = license_action_row_y();
+            int action_y2 = license_action_row2_y();
+
+            if (host_mode && point_in_rect(mouse.x, mouse.y, license_btn_activate_x(), action_y2, license_btn_activate_w(), license_button_h())) {
+                platform_clear_host_license_activation_request();
+                platform_request_host_license_activation();
+                license_lock_set_status("Host License Activation app launch requested.", 0x00b9d9f4);
+                handled = 1;
+                dirty = 1;
+            } else if (!host_mode && point_in_rect(mouse.x, mouse.y, license_btn_accept_x(), action_y, license_btn_accept_w(), license_button_h())) {
+                if (license_accept_terms()) {
+                    license_lock_set_status("Terms accepted.", 0x00a7e2bd);
+                } else {
+                    license_lock_set_status("Could not accept terms.", 0x00f3b1b1);
+                }
+                handled = 1;
+                dirty = 1;
+            } else if (!host_mode && point_in_rect(mouse.x, mouse.y, license_btn_reload_x(), action_y, license_btn_reload_w(), license_button_h())) {
+                license_reload();
+                license_lock_set_status("License database reloaded.", 0x00b9d9f4);
+                handled = 1;
+                dirty = 1;
+            } else if (!host_mode && point_in_rect(mouse.x, mouse.y, license_btn_backspace_x(), action_y, license_btn_backspace_w(), license_button_h())) {
+                license_key_backspace();
+                handled = 1;
+                dirty = 1;
+            } else if (!host_mode && point_in_rect(mouse.x, mouse.y, license_btn_clear_x(), action_y, license_btn_clear_w(), license_button_h())) {
+                license_key_clear();
+                handled = 1;
+                dirty = 1;
+            } else if (!host_mode && point_in_rect(mouse.x, mouse.y, license_btn_activate_x(), action_y2, license_btn_activate_w(), license_button_h())) {
+                (void)gui_license_activate_and_unlock();
+                handled = 1;
+                dirty = 1;
+            }
+
+            if (!handled && !host_mode && license_lock_ui_capture) {
+                for (int i = 0; i < LICENSE_KEYPAD_COUNT; i++) {
+                    int bx = license_keypad_button_x(i);
+                    int by = license_keypad_button_y(i);
+                    if (point_in_rect(mouse.x, mouse.y, bx, by, license_keypad_cell_w(), license_keypad_cell_h())) {
+                        license_key_append(license_keypad_chars[i]);
+                        handled = 1;
+                        dirty = 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (now_secs != last_clock_sec) {
+            dirty = 1;
+        }
+        if (need_redraw) {
+            dirty = 1;
+        }
+
+        uint64_t elapsed = now_ticks - last_frame_tick;
+        if (dirty && elapsed >= FRAME_TARGET_TICKS) {
+            gui_redraw(&mouse);
+            last_frame_tick = now_ticks;
+            last_clock_sec = now_secs;
+            overlay_prev = overlay;
+            need_redraw = 0;
+        } else if (!dirty && cursor_changed) {
+            if (fb_backbuffer_enabled()) {
+                cursor_present_only(&mouse);
+            } else {
+                gui_redraw(&mouse);
+                last_frame_tick = now_ticks;
+                last_clock_sec = now_secs;
+                overlay_prev = overlay;
+                need_redraw = 0;
+            }
+        }
+
+        mouse_prev_x = mouse.x;
+        mouse_prev_y = mouse.y;
+        mouse_prev_left = mouse.left ? 1 : 0;
+        mouse_prev_right = mouse.right ? 1 : 0;
+        return;
+    }
 
     if (right_pressed) {
         context_menu_open = 1;

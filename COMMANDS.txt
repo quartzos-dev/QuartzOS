@@ -41,6 +41,10 @@ make -j1
 make iso
 make disk
 make run
+make admin-app
+make health
+make smoke
+make overhaul
 
 7) If script is not executable
 ------------------------------
@@ -64,6 +68,19 @@ python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password
 python3 /Users/qian/Music/OS/QuartzOS-license-issuer/issue_license.py --password-env QOS_ISSUER_PASSWORD harden-store
 ./QuartzOS-license-issuer/macos_app/build_macos_app.sh
 open \"/Users/qian/Music/OS/build/QuartzOS License Issuer.app\"
+Note: Issuer app is dev/admin-only.
+
+8b) Public activation app commands
+----------------------------------
+./build_macos_activation_app.sh
+open \"/Users/qian/Music/OS/build/QuartzOS License Activation.app\"
+./tools/auto-activate-vm-license.sh QOS3-<YOUR-KEY>
+
+8c) All-in-one admin app commands
+---------------------------------
+./build_macos_admin_app.sh
+open \"/Users/qian/Music/OS/build/QuartzOS Admin Console.app\"
+python3 /Users/qian/Music/OS/tools/admin_security_audit.py --repo /Users/qian/Music/OS
 
 9) Open tier differences text file
 ----------------------------------

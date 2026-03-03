@@ -1,4 +1,5 @@
 #include <drivers/framebuffer.h>
+#include <drivers/keyboard.h>
 #include <drivers/mouse.h>
 #include <drivers/pit.h>
 #include <filesystem/sfs.h>
@@ -6,6 +7,8 @@
 #include <kernel/app_runtime.h>
 #include <kernel/console.h>
 #include <kernel/license.h>
+#include <kernel/platform.h>
+#include <kernel/shell.h>
 #include <kernel/security.h>
 #include <lib/string.h>
 #include <memory/heap.h>

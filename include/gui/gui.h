@@ -7,5 +7,6 @@ void gui_init(void);
 void gui_tick(void);
 void gui_set_console_overlay(bool enabled);
 bool gui_console_overlay(void);
+bool gui_license_input_active(void);
 
 #endif

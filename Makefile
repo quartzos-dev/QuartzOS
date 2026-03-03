@@ -41,6 +41,7 @@ KERNEL_C_SRCS := \
 	kernel/gdt.c \
 	kernel/cpu_hardening.c \
 	kernel/mp.c \
+	kernel/platform.c \
 	kernel/stack_protector.c \
 	kernel/syscall.c \
 	kernel/shell.c \
@@ -130,7 +131,7 @@ DISK_IMAGE := $(BUILD_DIR)/$(OS_NAME)_disk.img
 KERNEL_ELF := $(BUILD_DIR)/kernel.elf
 ISO_IMAGE := $(BUILD_DIR)/$(OS_NAME).iso
 
-.PHONY: all clean run iso kernel apps rootfs disk limine gui-assets
+.PHONY: all clean run iso kernel apps rootfs disk limine gui-assets health smoke overhaul admin-app
 
 all: iso
 
@@ -273,6 +274,20 @@ run: $(DISK_IMAGE)
 		-drive file=$(DISK_IMAGE),format=raw,if=ide,index=0 \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-serial stdio -no-reboot -no-shutdown
+
+health:
+	$(PY) tools/check_issuer_security.py
+	$(PY) QuartzOS-license-issuer/issue_license.py verify-store --require-manifest
+	$(PY) -m py_compile QuartzOS-license-issuer/issue_license.py server/quartzos_security_server.py
+
+smoke: $(ISO_IMAGE) $(DISK_IMAGE)
+	bash tools/qemu_smoke_test.sh $(ISO_IMAGE) $(DISK_IMAGE)
+
+overhaul:
+	bash tools/overhaul_scan.sh
+
+admin-app:
+	bash build_macos_admin_app.sh
 
 clean:
 	rm -rf $(BUILD_DIR)
